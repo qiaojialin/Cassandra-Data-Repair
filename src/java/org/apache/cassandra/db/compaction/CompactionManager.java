@@ -1356,6 +1356,7 @@ public class CompactionManager implements CompactionManagerMBean
 
             // Create Merkle trees suitable to hold estimated partitions for the given ranges.
             // We blindly assume that a partition is evenly distributed on all sstables for now.
+            long merkleStart = System.nanoTime();
             MerkleTrees tree = createMerkleTrees(sstables, validator.desc.ranges, cfs);
             long start = System.nanoTime();
             long partitionCount = 0;
@@ -1365,6 +1366,9 @@ public class CompactionManager implements CompactionManagerMBean
             {
                 // validate the CF as we iterate over it
                 validator.prepare(cfs, tree);
+                long merkleDuration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - merkleStart);
+                logger.info("Merkle Tree creation finished in {} msec",
+                             merkleDuration);
                 while (ci.hasNext())
                 {
                     if (ci.isStopRequested())

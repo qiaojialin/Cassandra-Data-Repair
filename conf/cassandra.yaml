@@ -10,6 +10,8 @@
 cluster_name: 'DataRepair Cluster'
 rpc_address: 192.168.130.115
 listen_address: 192.168.130.115
+# rpc_address: localhost
+# listen_address: localhost
 seed_provider:
     # Addresses of hosts that are deemed contact points. 
     # Cassandra nodes use this list of hosts to find each other and learn
@@ -19,8 +21,8 @@ seed_provider:
       parameters:
           # seeds is actually a comma-delimited list of addresses.
           # Ex: "<ip1>,<ip2>,<ip3>"
-          # - seeds: "127.0.0.1"
-          - seeds: "192.168.130.5, 192.168.130.6, 192.168.130.7"
+          # - seeds: "localhost"
+          - seeds: "192.168.130.5, 192.168.130.7, 192.168.130.8"
 # rpc_address: 127.0.0.1
 # listen_address: 127.0.0.1
 # This defines the number of tokens randomly assigned to this node on the ring
