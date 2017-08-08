@@ -30,8 +30,6 @@ import org.apache.cassandra.io.util.DataOutputBufferFixed;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.net.CompactEndpointSerializationHelper;
 import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.streaming.StreamOperation;
-import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.utils.UUIDSerializer;
 
 /**
@@ -45,24 +43,22 @@ public class StreamInitMessage
     public final InetAddress from;
     public final int sessionIndex;
     public final UUID planId;
-    public final StreamOperation streamOperation;
+    public final String description;
 
     // true if this init message is to connect for outgoing message on receiving side
     public final boolean isForOutgoing;
     public final boolean keepSSTableLevel;
-    public final UUID pendingRepair;
-    public final PreviewKind previewKind;
+    public final boolean isIncremental;
 
-    public StreamInitMessage(InetAddress from, int sessionIndex, UUID planId, StreamOperation streamOperation, boolean isForOutgoing, boolean keepSSTableLevel, UUID pendingRepair, PreviewKind previewKind)
+    public StreamInitMessage(InetAddress from, int sessionIndex, UUID planId, String description, boolean isForOutgoing, boolean keepSSTableLevel, boolean isIncremental)
     {
         this.from = from;
         this.sessionIndex = sessionIndex;
         this.planId = planId;
-        this.streamOperation = streamOperation;
+        this.description = description;
         this.isForOutgoing = isForOutgoing;
         this.keepSSTableLevel = keepSSTableLevel;
-        this.pendingRepair = pendingRepair;
-        this.previewKind = previewKind;
+        this.isIncremental = isIncremental;
     }
 
     /**
@@ -114,16 +110,10 @@ public class StreamInitMessage
             CompactEndpointSerializationHelper.serialize(message.from, out);
             out.writeInt(message.sessionIndex);
             UUIDSerializer.serializer.serialize(message.planId, out, MessagingService.current_version);
-            out.writeUTF(message.streamOperation.getDescription());
+            out.writeUTF(message.description);
             out.writeBoolean(message.isForOutgoing);
             out.writeBoolean(message.keepSSTableLevel);
-
-            out.writeBoolean(message.pendingRepair != null);
-            if (message.pendingRepair != null)
-            {
-                UUIDSerializer.serializer.serialize(message.pendingRepair, out, MessagingService.current_version);
-            }
-            out.writeInt(message.previewKind.getSerializationVal());
+            out.writeBoolean(message.isIncremental);
         }
 
         public StreamInitMessage deserialize(DataInputPlus in, int version) throws IOException
@@ -134,10 +124,8 @@ public class StreamInitMessage
             String description = in.readUTF();
             boolean sentByInitiator = in.readBoolean();
             boolean keepSSTableLevel = in.readBoolean();
-
-            UUID pendingRepair = in.readBoolean() ? UUIDSerializer.serializer.deserialize(in, version) : null;
-            PreviewKind previewKind = PreviewKind.deserialize(in.readInt());
-            return new StreamInitMessage(from, sessionIndex, planId, StreamOperation.fromString(description), sentByInitiator, keepSSTableLevel, pendingRepair, previewKind);
+            boolean isIncremental = in.readBoolean();
+            return new StreamInitMessage(from, sessionIndex, planId, description, sentByInitiator, keepSSTableLevel, isIncremental);
         }
 
         public long serializedSize(StreamInitMessage message, int version)
@@ -145,15 +133,10 @@ public class StreamInitMessage
             long size = CompactEndpointSerializationHelper.serializedSize(message.from);
             size += TypeSizes.sizeof(message.sessionIndex);
             size += UUIDSerializer.serializer.serializedSize(message.planId, MessagingService.current_version);
-            size += TypeSizes.sizeof(message.streamOperation.getDescription());
+            size += TypeSizes.sizeof(message.description);
             size += TypeSizes.sizeof(message.isForOutgoing);
             size += TypeSizes.sizeof(message.keepSSTableLevel);
-            size += TypeSizes.sizeof(message.pendingRepair != null);
-            if (message.pendingRepair != null)
-            {
-                size += UUIDSerializer.serializer.serializedSize(message.pendingRepair, MessagingService.current_version);
-            }
-            size += TypeSizes.sizeof(message.previewKind.getSerializationVal());
+            size += TypeSizes.sizeof(message.isIncremental);
             return size;
         }
     }

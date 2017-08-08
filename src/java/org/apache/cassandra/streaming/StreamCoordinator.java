@@ -41,25 +41,19 @@ public class StreamCoordinator
     // streaming is handled directly by the ConnectionHandler's incoming and outgoing threads.
     private static final DebuggableThreadPoolExecutor streamExecutor = DebuggableThreadPoolExecutor.createWithFixedPoolSize("StreamConnectionEstablisher",
                                                                                                                             FBUtilities.getAvailableProcessors());
-    private final boolean connectSequentially;
 
     private Map<InetAddress, HostStreamingData> peerSessions = new HashMap<>();
     private final int connectionsPerHost;
     private StreamConnectionFactory factory;
     private final boolean keepSSTableLevel;
-    private Iterator<StreamSession> sessionsToConnect = null;
-    private final UUID pendingRepair;
-    private final PreviewKind previewKind;
+    private final boolean isIncremental;
 
-    public StreamCoordinator(int connectionsPerHost, boolean keepSSTableLevel, StreamConnectionFactory factory,
-                             boolean connectSequentially, UUID pendingRepair, PreviewKind previewKind)
+    public StreamCoordinator(int connectionsPerHost, boolean keepSSTableLevel, boolean isIncremental, StreamConnectionFactory factory)
     {
         this.connectionsPerHost = connectionsPerHost;
         this.factory = factory;
         this.keepSSTableLevel = keepSSTableLevel;
-        this.connectSequentially = connectSequentially;
-        this.pendingRepair = pendingRepair;
-        this.previewKind = previewKind;
+        this.isIncremental = isIncremental;
     }
 
     public void setConnectionFactory(StreamConnectionFactory factory)
@@ -95,57 +89,10 @@ public class StreamCoordinator
         return connectionsPerHost == 0;
     }
 
-    public void connect(StreamResultFuture future)
-    {
-        if (this.connectSequentially)
-            connectSequentially(future);
-        else
-            connectAllStreamSessions();
-    }
-
-    private void connectAllStreamSessions()
+    public void connectAllStreamSessions()
     {
         for (HostStreamingData data : peerSessions.values())
             data.connectAllStreamSessions();
-    }
-
-    private void connectSequentially(StreamResultFuture future)
-    {
-        sessionsToConnect = getAllStreamSessions().iterator();
-        future.addEventListener(new StreamEventHandler()
-        {
-            public void handleStreamEvent(StreamEvent event)
-            {
-                if (event.eventType == StreamEvent.Type.STREAM_PREPARED || event.eventType == StreamEvent.Type.STREAM_COMPLETE)
-                    connectNext();
-            }
-
-            public void onSuccess(StreamState result)
-            {
-
-            }
-
-            public void onFailure(Throwable t)
-            {
-
-            }
-        });
-        connectNext();
-    }
-
-    private void connectNext()
-    {
-        if (sessionsToConnect == null)
-            return;
-
-        if (sessionsToConnect.hasNext())
-        {
-            StreamSession next = sessionsToConnect.next();
-            logger.debug("Connecting next session {} with {}.", next.planId(), next.peer.getHostAddress());
-            streamExecutor.execute(new StreamSessionConnector(next));
-        }
-        else
-            logger.debug("Finished connecting all sessions");
     }
 
     public synchronized Set<InetAddress> getPeers()
@@ -251,11 +198,6 @@ public class StreamCoordinator
         return data;
     }
 
-    public UUID getPendingRepair()
-    {
-        return pendingRepair;
-    }
-
     private static class StreamSessionConnector implements Runnable
     {
         private final StreamSession session;
@@ -295,7 +237,7 @@ public class StreamCoordinator
             // create
             if (streamSessions.size() < connectionsPerHost)
             {
-                StreamSession session = new StreamSession(peer, connecting, factory, streamSessions.size(), keepSSTableLevel, pendingRepair, previewKind);
+                StreamSession session = new StreamSession(peer, connecting, factory, streamSessions.size(), keepSSTableLevel, isIncremental);
                 streamSessions.put(++lastReturned, session);
                 return session;
             }
@@ -327,7 +269,7 @@ public class StreamCoordinator
             StreamSession session = streamSessions.get(id);
             if (session == null)
             {
-                session = new StreamSession(peer, connecting, factory, id, keepSSTableLevel, pendingRepair, previewKind);
+                session = new StreamSession(peer, connecting, factory, id, keepSSTableLevel, isIncremental);
                 streamSessions.put(id, session);
             }
             return session;

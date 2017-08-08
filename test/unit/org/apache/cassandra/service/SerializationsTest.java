@@ -20,13 +20,10 @@ package org.apache.cassandra.service;
 
 import java.io.IOException;
 import java.net.InetAddress;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.List;
 import java.util.UUID;
 
-import com.google.common.collect.Lists;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -34,7 +31,6 @@ import org.junit.Test;
 import org.apache.cassandra.AbstractSerializationsTester;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.Util.PartitionerSwitcher;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.RandomPartitioner;
 import org.apache.cassandra.dht.Range;
@@ -42,17 +38,13 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.util.DataInputPlus.DataInputStreamPlus;
 import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.net.MessageIn;
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.repair.NodePair;
 import org.apache.cassandra.repair.RepairJobDesc;
 import org.apache.cassandra.repair.Validator;
 import org.apache.cassandra.repair.messages.*;
-import org.apache.cassandra.schema.TableId;
-import org.apache.cassandra.streaming.PreviewKind;
-import org.apache.cassandra.streaming.SessionSummary;
-import org.apache.cassandra.streaming.StreamSummary;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MerkleTrees;
-import org.apache.cassandra.utils.UUIDGen;
 
 public class SerializationsTest extends AbstractSerializationsTester
 {
@@ -64,11 +56,10 @@ public class SerializationsTest extends AbstractSerializationsTester
     @BeforeClass
     public static void defineSchema() throws Exception
     {
-        DatabaseDescriptor.daemonInitialization();
         partitionerSwitcher = Util.switchPartitioner(RandomPartitioner.instance);
         RANDOM_UUID = UUID.fromString("b5c3d033-75aa-4c2f-a819-947aac7a0c54");
         FULL_RANGE = new Range<>(Util.testPartitioner().getMinimumToken(), Util.testPartitioner().getMinimumToken());
-        DESC = new RepairJobDesc(RANDOM_UUID, RANDOM_UUID, "Keyspace1", "Standard1", Arrays.asList(FULL_RANGE));
+        DESC = new RepairJobDesc(getVersion() < MessagingService.VERSION_21 ? null : RANDOM_UUID, RANDOM_UUID, "Keyspace1", "Standard1", Arrays.asList(FULL_RANGE));
     }
 
     @AfterClass
@@ -76,7 +67,7 @@ public class SerializationsTest extends AbstractSerializationsTester
     {
         partitionerSwitcher.close();
     }
-
+    
     private void testRepairMessageWrite(String fileName, RepairMessage... messages) throws IOException
     {
         try (DataOutputStreamPlus out = getOutput(fileName))
@@ -123,7 +114,7 @@ public class SerializationsTest extends AbstractSerializationsTester
 
         // empty validation
         mt.addMerkleTree((int) Math.pow(2, 15), FULL_RANGE);
-        Validator v0 = new Validator(DESC, FBUtilities.getBroadcastAddress(), -1, PreviewKind.NONE);
+        Validator v0 = new Validator(DESC, FBUtilities.getBroadcastAddress(),  -1);
         ValidationComplete c0 = new ValidationComplete(DESC, mt);
 
         // validation with a tree
@@ -131,7 +122,7 @@ public class SerializationsTest extends AbstractSerializationsTester
         mt.addMerkleTree(Integer.MAX_VALUE, FULL_RANGE);
         for (int i = 0; i < 10; i++)
             mt.split(p.getRandomToken());
-        Validator v1 = new Validator(DESC, FBUtilities.getBroadcastAddress(), -1, PreviewKind.NONE);
+        Validator v1 = new Validator(DESC, FBUtilities.getBroadcastAddress(), -1);
         ValidationComplete c1 = new ValidationComplete(DESC, mt);
 
         // validation failed
@@ -183,8 +174,8 @@ public class SerializationsTest extends AbstractSerializationsTester
         InetAddress local = InetAddress.getByAddress(new byte[]{127, 0, 0, 1});
         InetAddress src = InetAddress.getByAddress(new byte[]{127, 0, 0, 2});
         InetAddress dest = InetAddress.getByAddress(new byte[]{127, 0, 0, 3});
+        SyncRequest message = new SyncRequest(DESC, local, src, dest, Collections.singleton(FULL_RANGE));
 
-        SyncRequest message = new SyncRequest(DESC, local, src, dest, Collections.singleton(FULL_RANGE), PreviewKind.NONE);
         testRepairMessageWrite("service.SyncRequest.bin", message);
     }
 
@@ -217,14 +208,9 @@ public class SerializationsTest extends AbstractSerializationsTester
         InetAddress src = InetAddress.getByAddress(new byte[]{127, 0, 0, 2});
         InetAddress dest = InetAddress.getByAddress(new byte[]{127, 0, 0, 3});
         // sync success
-        List<SessionSummary> summaries = new ArrayList<>();
-        summaries.add(new SessionSummary(src, dest,
-                                         Lists.newArrayList(new StreamSummary(TableId.fromUUID(UUIDGen.getTimeUUID()), 5, 100)),
-                                         Lists.newArrayList(new StreamSummary(TableId.fromUUID(UUIDGen.getTimeUUID()), 500, 10))
-        ));
-        SyncComplete success = new SyncComplete(DESC, src, dest, true, summaries);
+        SyncComplete success = new SyncComplete(DESC, src, dest, true);
         // sync fail
-        SyncComplete fail = new SyncComplete(DESC, src, dest, false, Collections.emptyList());
+        SyncComplete fail = new SyncComplete(DESC, src, dest, false);
 
         testRepairMessageWrite("service.SyncComplete.bin", success, fail);
     }

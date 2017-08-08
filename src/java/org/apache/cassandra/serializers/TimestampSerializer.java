@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.serializers;
 
-import io.netty.util.concurrent.FastThreadLocal;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 import java.nio.ByteBuffer;
@@ -34,8 +33,7 @@ public class TimestampSerializer implements TypeSerializer<Date>
 
     //NOTE: This list is used below and if you change the order
     //      you need to update the default format and json formats in the code below.
-    private static final String[] dateStringPatterns = new String[]
-    {
+    private static final String[] dateStringPatterns = new String[] {
             "yyyy-MM-dd HH:mm",
             "yyyy-MM-dd HH:mm:ss",
             "yyyy-MM-dd HH:mm z",
@@ -51,11 +49,11 @@ public class TimestampSerializer implements TypeSerializer<Date>
             "yyyy-MM-dd HH:mm:ssX",
             "yyyy-MM-dd HH:mm:ssXX",
             "yyyy-MM-dd HH:mm:ssXXX",
-            "yyyy-MM-dd HH:mm:ss.SSS",
+            "yyyy-MM-dd HH:mm:ss.SSS",   // TO_JSON_FORMAT
             "yyyy-MM-dd HH:mm:ss.SSS z",
             "yyyy-MM-dd HH:mm:ss.SSS zz",
             "yyyy-MM-dd HH:mm:ss.SSS zzz",
-            "yyyy-MM-dd HH:mm:ss.SSSX", // TO_JSON_FORMAT
+            "yyyy-MM-dd HH:mm:ss.SSSX",
             "yyyy-MM-dd HH:mm:ss.SSSXX",
             "yyyy-MM-dd HH:mm:ss.SSSXXX",
             "yyyy-MM-dd'T'HH:mm",
@@ -91,7 +89,7 @@ public class TimestampSerializer implements TypeSerializer<Date>
     private static final String DEFAULT_FORMAT = dateStringPatterns[6];
     private static final Pattern timestampPattern = Pattern.compile("^-?\\d+$");
 
-    private static final FastThreadLocal<SimpleDateFormat> FORMATTER = new FastThreadLocal<SimpleDateFormat>()
+    private static final ThreadLocal<SimpleDateFormat> FORMATTER = new ThreadLocal<SimpleDateFormat>()
     {
         protected SimpleDateFormat initialValue()
         {
@@ -100,7 +98,7 @@ public class TimestampSerializer implements TypeSerializer<Date>
     };
 
     private static final String UTC_FORMAT = dateStringPatterns[40];
-    private static final FastThreadLocal<SimpleDateFormat> FORMATTER_UTC = new FastThreadLocal<SimpleDateFormat>()
+    private static final ThreadLocal<SimpleDateFormat> FORMATTER_UTC = new ThreadLocal<SimpleDateFormat>()
     {
         protected SimpleDateFormat initialValue()
         {
@@ -110,18 +108,7 @@ public class TimestampSerializer implements TypeSerializer<Date>
         }
     };
 
-    private static final String TO_JSON_FORMAT = dateStringPatterns[19];
-    private static final FastThreadLocal<SimpleDateFormat> FORMATTER_TO_JSON = new FastThreadLocal<SimpleDateFormat>()
-    {
-        protected SimpleDateFormat initialValue()
-        {
-            SimpleDateFormat sdf = new SimpleDateFormat(TO_JSON_FORMAT);
-            sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
-            return sdf;
-        }
-    };
-
-
+    public static final SimpleDateFormat TO_JSON_FORMAT = new SimpleDateFormat(dateStringPatterns[15]);
 
     public static final TimestampSerializer instance = new TimestampSerializer();
 
@@ -164,11 +151,6 @@ public class TimestampSerializer implements TypeSerializer<Date>
         }
     }
 
-    public static SimpleDateFormat getJsonDateFormatter()
-    {
-    	return FORMATTER_TO_JSON.get();
-    }
-
     public void validate(ByteBuffer bytes) throws MarshalException
     {
         if (bytes.remaining() != 8 && bytes.remaining() != 0)
@@ -195,10 +177,11 @@ public class TimestampSerializer implements TypeSerializer<Date>
      * @see #FORMATTER_UTC
      */
     @Override
-    public String toCQLLiteral(ByteBuffer buffer)
+    public void toCQLLiteral(ByteBuffer buffer, StringBuilder target)
     {
-        return buffer == null || !buffer.hasRemaining()
-             ? "null"
-             : FORMATTER_UTC.get().format(deserialize(buffer));
+        if (buffer == null || !buffer.hasRemaining())
+            target.append("null");
+        else
+            target.append(FORMATTER_UTC.get().format(deserialize(buffer)));
     }
 }

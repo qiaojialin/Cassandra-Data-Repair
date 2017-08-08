@@ -20,7 +20,7 @@ package org.apache.cassandra.io.util;
 import java.io.Closeable;
 import java.io.IOException;
 
-public interface FileDataInput extends RewindableDataInput, Closeable
+public interface FileDataInput extends DataInputPlus, Closeable
 {
     String getPath();
 
@@ -29,6 +29,12 @@ public interface FileDataInput extends RewindableDataInput, Closeable
     long bytesRemaining() throws IOException;
 
     void seek(long pos) throws IOException;
+
+    FileMark mark();
+
+    void reset(FileMark mark) throws IOException;
+
+    long bytesPastMark(FileMark mark);
 
     long getFilePointer();
 }

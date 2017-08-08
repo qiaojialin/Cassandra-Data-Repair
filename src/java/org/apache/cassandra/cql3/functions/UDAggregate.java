@@ -21,15 +21,14 @@ import java.nio.ByteBuffer;
 import java.util.*;
 
 import com.google.common.base.Objects;
+import com.google.common.collect.ImmutableSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.datastax.driver.core.TypeCodec;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.schema.Functions;
 import org.apache.cassandra.tracing.Tracing;
-import org.apache.cassandra.transport.ProtocolVersion;
 
 /**
  * Base class for user-defined-aggregates.
@@ -38,9 +37,7 @@ public class UDAggregate extends AbstractFunction implements AggregateFunction
 {
     protected static final Logger logger = LoggerFactory.getLogger(UDAggregate.class);
 
-    private final AbstractType<?> stateType;
-    private final TypeCodec stateTypeCodec;
-    private final TypeCodec returnTypeCodec;
+    protected final AbstractType<?> stateType;
     protected final ByteBuffer initcond;
     private final ScalarFunction stateFunction;
     private final ScalarFunction finalFunction;
@@ -56,8 +53,6 @@ public class UDAggregate extends AbstractFunction implements AggregateFunction
         this.stateFunction = stateFunc;
         this.finalFunction = finalFunc;
         this.stateType = stateFunc != null ? stateFunc.returnType() : null;
-        this.stateTypeCodec = stateType != null ? UDHelper.codecFor(UDHelper.driverType(stateType)) : null;
-        this.returnTypeCodec = returnType != null ? UDHelper.codecFor(UDHelper.driverType(returnType)) : null;
         this.initcond = initcond;
     }
 
@@ -74,7 +69,7 @@ public class UDAggregate extends AbstractFunction implements AggregateFunction
         List<AbstractType<?>> stateTypes = new ArrayList<>(argTypes.size() + 1);
         stateTypes.add(stateType);
         stateTypes.addAll(argTypes);
-        List<AbstractType<?>> finalTypes = Collections.singletonList(stateType);
+        List<AbstractType<?>> finalTypes = Collections.<AbstractType<?>>singletonList(stateType);
         return new UDAggregate(name,
                                argTypes,
                                returnType,
@@ -87,7 +82,7 @@ public class UDAggregate extends AbstractFunction implements AggregateFunction
                                            List<AbstractType<?>> argTypes,
                                            AbstractType<?> returnType,
                                            ByteBuffer initcond,
-                                           InvalidRequestException reason)
+                                           final InvalidRequestException reason)
     {
         return new UDAggregate(name, argTypes, returnType, null, null, initcond)
         {
@@ -106,17 +101,14 @@ public class UDAggregate extends AbstractFunction implements AggregateFunction
         return stateFunction == function || finalFunction == function;
     }
 
-    @Override
-    public void addFunctionsTo(List<Function> functions)
+    public Iterable<Function> getFunctions()
     {
-        functions.add(this);
-        if (stateFunction != null)
-        {
-            stateFunction.addFunctionsTo(functions);
-
-            if (finalFunction != null)
-                finalFunction.addFunctionsTo(functions);
-        }
+        if (stateFunction == null)
+            return Collections.emptySet();
+        if (finalFunction != null)
+            return ImmutableSet.of(this, stateFunction, finalFunction);
+        else
+            return ImmutableSet.of(this, stateFunction);
     }
 
     public boolean isAggregate()
@@ -156,60 +148,48 @@ public class UDAggregate extends AbstractFunction implements AggregateFunction
             private long stateFunctionCount;
             private long stateFunctionDuration;
 
-            private Object state;
-            private boolean needsInit = true;
-
-            public void addInput(ProtocolVersion protocolVersion, List<ByteBuffer> values) throws InvalidRequestException
+            private ByteBuffer state;
             {
-                maybeInit(protocolVersion);
+                reset();
+            }
 
+            public void addInput(int protocolVersion, List<ByteBuffer> values) throws InvalidRequestException
+            {
                 long startTime = System.nanoTime();
                 stateFunctionCount++;
+                List<ByteBuffer> fArgs = new ArrayList<>(values.size() + 1);
+                fArgs.add(state);
+                fArgs.addAll(values);
                 if (stateFunction instanceof UDFunction)
                 {
                     UDFunction udf = (UDFunction)stateFunction;
-                    if (udf.isCallableWrtNullable(values))
-                        state = udf.executeForAggregate(protocolVersion, state, values);
+                    if (udf.isCallableWrtNullable(fArgs))
+                        state = udf.execute(protocolVersion, fArgs);
                 }
                 else
                 {
-                    throw new UnsupportedOperationException("UDAs only support UDFs");
+                    state = stateFunction.execute(protocolVersion, fArgs);
                 }
                 stateFunctionDuration += (System.nanoTime() - startTime) / 1000;
             }
 
-            private void maybeInit(ProtocolVersion protocolVersion)
+            public ByteBuffer compute(int protocolVersion) throws InvalidRequestException
             {
-                if (needsInit)
-                {
-                    state = initcond != null ? UDHelper.deserialize(stateTypeCodec, protocolVersion, initcond.duplicate()) : null;
-                    stateFunctionDuration = 0;
-                    stateFunctionCount = 0;
-                    needsInit = false;
-                }
-            }
-
-            public ByteBuffer compute(ProtocolVersion protocolVersion) throws InvalidRequestException
-            {
-                maybeInit(protocolVersion);
-
                 // final function is traced in UDFunction
                 Tracing.trace("Executed UDA {}: {} call(s) to state function {} in {}\u03bcs", name(), stateFunctionCount, stateFunction.name(), stateFunctionDuration);
                 if (finalFunction == null)
-                    return UDFunction.decompose(stateTypeCodec, protocolVersion, state);
+                    return state;
 
-                if (finalFunction instanceof UDFunction)
-                {
-                    UDFunction udf = (UDFunction)finalFunction;
-                    Object result = udf.executeForAggregate(protocolVersion, state, Collections.emptyList());
-                    return UDFunction.decompose(returnTypeCodec, protocolVersion, result);
-                }
-                throw new UnsupportedOperationException("UDAs only support UDFs");
+                List<ByteBuffer> fArgs = Collections.singletonList(state);
+                ByteBuffer result = finalFunction.execute(protocolVersion, fArgs);
+                return result;
             }
 
             public void reset()
             {
-                needsInit = true;
+                state = initcond != null ? initcond.duplicate() : null;
+                stateFunctionDuration = 0;
+                stateFunctionCount = 0;
             }
         };
     }
@@ -243,7 +223,7 @@ public class UDAggregate extends AbstractFunction implements AggregateFunction
             && Functions.typesMatch(returnType, that.returnType)
             && Objects.equal(stateFunction, that.stateFunction)
             && Objects.equal(finalFunction, that.finalFunction)
-            && ((stateType == that.stateType) || ((stateType != null) && stateType.equals(that.stateType, true)))  // ignore freezing
+            && Objects.equal(stateType, that.stateType)
             && Objects.equal(initcond, that.initcond);
     }
 

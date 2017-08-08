@@ -17,8 +17,8 @@
  */
 package org.apache.cassandra.dht;
 
-import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.BufferDecoratedKey;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.marshal.AbstractType;
@@ -41,7 +41,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
-import java.util.concurrent.ThreadLocalRandom;
 
 public class ByteOrderedPartitioner implements IPartitioner
 {
@@ -158,11 +157,6 @@ public class ByteOrderedPartitioner implements IPartitioner
         return new BytesToken(bytesForBig(midpair.left, sigbytes, midpair.right));
     }
 
-    public Token split(Token left, Token right, double ratioToLeft)
-    {
-        throw new UnsupportedOperationException();
-    }
-
     /**
      * Convert a byte array containing the most significant of 'sigbytes' bytes
      * representing a big-endian magnitude into a BigInteger.
@@ -209,18 +203,13 @@ public class ByteOrderedPartitioner implements IPartitioner
 
     public BytesToken getRandomToken()
     {
-       return getRandomToken(ThreadLocalRandom.current());
-    }
-
-    public BytesToken getRandomToken(Random random)
-    {
+        Random r = new Random();
         byte[] buffer = new byte[16];
-        random.nextBytes(buffer);
+        r.nextBytes(buffer);
         return new BytesToken(buffer);
     }
 
-    private final Token.TokenFactory tokenFactory = new Token.TokenFactory() 
-    {
+    private final Token.TokenFactory tokenFactory = new Token.TokenFactory() {
         public ByteBuffer toByteArray(Token token)
         {
             BytesToken bytesToken = (BytesToken) token;
@@ -287,12 +276,12 @@ public class ByteOrderedPartitioner implements IPartitioner
 
         for (String ks : Schema.instance.getKeyspaces())
         {
-            for (TableMetadata cfmd : Schema.instance.getTablesAndViews(ks))
+            for (CFMetaData cfmd : Schema.instance.getTablesAndViews(ks))
             {
                 for (Range<Token> r : sortedRanges)
                 {
                     // Looping over every KS:CF:Range, get the splits size and add it to the count
-                    allTokens.put(r.right, allTokens.get(r.right) + StorageService.instance.getSplits(ks, cfmd.name, r, 1).size());
+                    allTokens.put(r.right, allTokens.get(r.right) + StorageService.instance.getSplits(ks, cfmd.cfName, r, 1).size());
                 }
             }
         }

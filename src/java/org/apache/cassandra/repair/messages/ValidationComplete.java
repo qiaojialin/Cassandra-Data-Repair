@@ -18,7 +18,6 @@
 package org.apache.cassandra.repair.messages;
 
 import java.io.IOException;
-import java.util.Objects;
 
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.util.DataInputPlus;
@@ -54,23 +53,6 @@ public class ValidationComplete extends RepairMessage
     public boolean success()
     {
         return trees != null;
-    }
-
-    @Override
-    public boolean equals(Object o)
-    {
-        if (!(o instanceof ValidationComplete))
-            return false;
-
-        ValidationComplete other = (ValidationComplete)o;
-        return messageType == other.messageType &&
-               desc.equals(other.desc);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(messageType, desc);
     }
 
     private static class ValidationCompleteSerializer implements MessageSerializer<ValidationComplete>

@@ -48,7 +48,7 @@ public class ExpiringMap<K, V>
             assert value != null;
             this.value = value;
             this.timeout = timeout;
-            this.createdAt = Clock.instance.nanoTime();
+            this.createdAt = System.nanoTime();
         }
 
         private boolean isReadyToDieAt(long atNano)
@@ -85,7 +85,7 @@ public class ExpiringMap<K, V>
         {
             public void run()
             {
-                long start = Clock.instance.nanoTime();
+                long start = System.nanoTime();
                 int n = 0;
                 for (Map.Entry<K, CacheableObject<V>> entry : cache.entrySet())
                 {
@@ -105,12 +105,12 @@ public class ExpiringMap<K, V>
         service.scheduleWithFixedDelay(runnable, defaultExpiration / 2, defaultExpiration / 2, TimeUnit.MILLISECONDS);
     }
 
-    public boolean shutdownBlocking()
+    public void shutdownBlocking()
     {
         service.shutdown();
         try
         {
-            return service.awaitTermination(defaultExpiration * 2, TimeUnit.MILLISECONDS);
+            service.awaitTermination(defaultExpiration * 2, TimeUnit.MILLISECONDS);
         }
         catch (InterruptedException e)
         {

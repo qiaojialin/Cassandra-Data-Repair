@@ -22,6 +22,9 @@ import java.util.concurrent.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.tracing.TraceState;
+import org.apache.cassandra.tracing.Tracing;
+
 import static org.apache.cassandra.tracing.Tracing.isTracing;
 
 /**
@@ -41,7 +44,7 @@ import static org.apache.cassandra.tracing.Tracing.isTracing;
  *   threads and the queue is full, we want the enqueuer to block.  But to allow the number of threads to drop if a
  *   stage is less busy, core thread timeout is enabled.
  */
-public class DebuggableThreadPoolExecutor extends ThreadPoolExecutor implements LocalAwareExecutorService
+public class DebuggableThreadPoolExecutor extends ThreadPoolExecutor implements TracingAwareExecutorService
 {
     protected static final Logger logger = LoggerFactory.getLogger(DebuggableThreadPoolExecutor.class);
     public static final RejectedExecutionHandler blockingExecutionHandler = new RejectedExecutionHandler()
@@ -143,11 +146,11 @@ public class DebuggableThreadPoolExecutor extends ThreadPoolExecutor implements 
     protected void onFinalAccept(Runnable task) {}
     protected void onFinalRejection(Runnable task) {}
 
-    public void execute(Runnable command, ExecutorLocals locals)
+    public void execute(Runnable command, TraceState state)
     {
-        super.execute(locals == null || command instanceof LocalSessionWrapper
+        super.execute(state == null || command instanceof TraceSessionWrapper
                       ? command
-                      : new LocalSessionWrapper<Object>(command, locals));
+                      : new TraceSessionWrapper<Object>(command, state));
     }
 
     public void maybeExecuteImmediately(Runnable command)
@@ -159,17 +162,17 @@ public class DebuggableThreadPoolExecutor extends ThreadPoolExecutor implements 
     @Override
     public void execute(Runnable command)
     {
-        super.execute(isTracing() && !(command instanceof LocalSessionWrapper)
-                      ? new LocalSessionWrapper<Object>(Executors.callable(command, null))
+        super.execute(isTracing() && !(command instanceof TraceSessionWrapper)
+                      ? new TraceSessionWrapper<Object>(Executors.callable(command, null))
                       : command);
     }
 
     @Override
     protected <T> RunnableFuture<T> newTaskFor(Runnable runnable, T result)
     {
-        if (isTracing() && !(runnable instanceof LocalSessionWrapper))
+        if (isTracing() && !(runnable instanceof TraceSessionWrapper))
         {
-            return new LocalSessionWrapper<T>(Executors.callable(runnable, result));
+            return new TraceSessionWrapper<T>(Executors.callable(runnable, result));
         }
         return super.newTaskFor(runnable, result);
     }
@@ -177,9 +180,9 @@ public class DebuggableThreadPoolExecutor extends ThreadPoolExecutor implements 
     @Override
     protected <T> RunnableFuture<T> newTaskFor(Callable<T> callable)
     {
-        if (isTracing() && !(callable instanceof LocalSessionWrapper))
+        if (isTracing() && !(callable instanceof TraceSessionWrapper))
         {
-            return new LocalSessionWrapper<T>(callable);
+            return new TraceSessionWrapper<T>(callable);
         }
         return super.newTaskFor(callable);
     }
@@ -195,9 +198,9 @@ public class DebuggableThreadPoolExecutor extends ThreadPoolExecutor implements 
 
     protected static void maybeResetTraceSessionWrapper(Runnable r)
     {
-        if (r instanceof LocalSessionWrapper)
+        if (r instanceof TraceSessionWrapper)
         {
-            LocalSessionWrapper tsw = (LocalSessionWrapper) r;
+            TraceSessionWrapper tsw = (TraceSessionWrapper) r;
             // we have to reset trace state as its presence is what denotes the current thread is tracing
             // and if left this thread might start tracing unrelated tasks
             tsw.reset();
@@ -207,8 +210,8 @@ public class DebuggableThreadPoolExecutor extends ThreadPoolExecutor implements 
     @Override
     protected void beforeExecute(Thread t, Runnable r)
     {
-        if (r instanceof LocalSessionWrapper)
-            ((LocalSessionWrapper) r).setupContext();
+        if (r instanceof TraceSessionWrapper)
+            ((TraceSessionWrapper) r).setupContext();
 
         super.beforeExecute(t, r);
     }
@@ -275,35 +278,35 @@ public class DebuggableThreadPoolExecutor extends ThreadPoolExecutor implements 
     }
 
     /**
-     * Used to wrap a Runnable or Callable passed to submit or execute so we can clone the ExecutorLocals and move
-     * them into the worker thread.
+     * Used to wrap a Runnable or Callable passed to submit or execute so we can clone the TraceSessionContext and move
+     * it into the worker thread.
      *
      * @param <T>
      */
-    private static class LocalSessionWrapper<T> extends FutureTask<T>
+    private static class TraceSessionWrapper<T> extends FutureTask<T>
     {
-        private final ExecutorLocals locals;
+        private final TraceState state;
 
-        public LocalSessionWrapper(Callable<T> callable)
+        public TraceSessionWrapper(Callable<T> callable)
         {
             super(callable);
-            locals = ExecutorLocals.create();
+            state = Tracing.instance.get();
         }
 
-        public LocalSessionWrapper(Runnable command, ExecutorLocals locals)
+        public TraceSessionWrapper(Runnable command, TraceState state)
         {
             super(command, null);
-            this.locals = locals;
+            this.state = state;
         }
 
         private void setupContext()
         {
-            ExecutorLocals.set(locals);
+            Tracing.instance.set(state);
         }
 
         private void reset()
         {
-            ExecutorLocals.set(null);
+            Tracing.instance.set(null);
         }
     }
 }

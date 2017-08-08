@@ -22,19 +22,17 @@ import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
-import java.util.function.BooleanSupplier;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
 import com.google.common.util.concurrent.RateLimiter;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.monitoring.ApproximateTime;
-import org.apache.cassandra.exceptions.RequestFailureReason;
-import org.apache.cassandra.metrics.HintsServiceMetrics;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.net.IAsyncCallbackWithFailure;
 import org.apache.cassandra.net.MessageIn;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.concurrent.SimpleCondition;
 
 /**
@@ -45,33 +43,32 @@ import org.apache.cassandra.utils.concurrent.SimpleCondition;
  */
 final class HintsDispatcher implements AutoCloseable
 {
-    private static final Logger logger = LoggerFactory.getLogger(HintsDispatcher.class);
-
-    private enum Action { CONTINUE, ABORT }
+    private enum Action { CONTINUE, ABORT, RETRY }
 
     private final HintsReader reader;
     private final UUID hostId;
     private final InetAddress address;
     private final int messagingVersion;
-    private final BooleanSupplier abortRequested;
+    private final AtomicBoolean isPaused;
 
-    private InputPosition currentPagePosition;
+    private long currentPageOffset;
 
-    private HintsDispatcher(HintsReader reader, UUID hostId, InetAddress address, int messagingVersion, BooleanSupplier abortRequested)
+    private HintsDispatcher(HintsReader reader, UUID hostId, InetAddress address, int messagingVersion, AtomicBoolean isPaused)
     {
-        currentPagePosition = null;
+        currentPageOffset = 0L;
 
         this.reader = reader;
         this.hostId = hostId;
         this.address = address;
         this.messagingVersion = messagingVersion;
-        this.abortRequested = abortRequested;
+        this.isPaused = isPaused;
     }
 
-    static HintsDispatcher create(File file, RateLimiter rateLimiter, InetAddress address, UUID hostId, BooleanSupplier abortRequested)
+    static HintsDispatcher create(File file, RateLimiter rateLimiter, UUID hostId, UUID hintFor, AtomicBoolean isPaused)
     {
+        InetAddress address = StorageService.instance.getEndpointForHostId(hostId);
         int messagingVersion = MessagingService.instance().getVersion(address);
-        return new HintsDispatcher(HintsReader.open(file, rateLimiter), hostId, address, messagingVersion, abortRequested);
+        return new HintsDispatcher(HintsReader.open(file, rateLimiter), hintFor, address, messagingVersion, isPaused);
     }
 
     public void close()
@@ -79,9 +76,10 @@ final class HintsDispatcher implements AutoCloseable
         reader.close();
     }
 
-    void seek(InputPosition position)
+    void seek(long bytes)
     {
-        reader.seek(position);
+        reader.seek(bytes);
+        currentPageOffset = 0L;
     }
 
     /**
@@ -91,7 +89,7 @@ final class HintsDispatcher implements AutoCloseable
     {
         for (HintsReader.Page page : reader)
         {
-            currentPagePosition = page.position;
+            currentPageOffset = page.offset;
             if (dispatch(page) != Action.CONTINUE)
                 return false;
         }
@@ -102,16 +100,28 @@ final class HintsDispatcher implements AutoCloseable
     /**
      * @return offset of the first non-delivered page
      */
-    InputPosition dispatchPosition()
+    long dispatchOffset()
     {
-        return currentPagePosition;
+        return currentPageOffset;
     }
 
+    private boolean isHostAlive()
+    {
+        return FailureDetector.instance.isAlive(address);
+    }
+
+    private boolean isPaused()
+    {
+        return isPaused.get();
+    }
 
     // retry in case of a timeout; stop in case of a failure, host going down, or delivery paused
     private Action dispatch(HintsReader.Page page)
     {
-        return sendHintsAndAwait(page);
+        Action action = sendHintsAndAwait(page);
+        return action == Action.RETRY
+             ? dispatch(page)
+             : action;
     }
 
     private Action sendHintsAndAwait(HintsReader.Page page)
@@ -132,44 +142,21 @@ final class HintsDispatcher implements AutoCloseable
         if (action == Action.ABORT)
             return action;
 
-        boolean hadFailures = false;
         for (Callback cb : callbacks)
-        {
-            Callback.Outcome outcome = cb.await();
-            updateMetrics(outcome);
+            if (cb.await() != Callback.Outcome.SUCCESS)
+                return Action.RETRY;
 
-            if (outcome != Callback.Outcome.SUCCESS)
-                hadFailures = true;
-        }
-
-        return hadFailures ? Action.ABORT : Action.CONTINUE;
-    }
-
-    private void updateMetrics(Callback.Outcome outcome)
-    {
-        switch (outcome)
-        {
-            case SUCCESS:
-                HintsServiceMetrics.hintsSucceeded.mark();
-                break;
-            case FAILURE:
-                HintsServiceMetrics.hintsFailed.mark();
-                break;
-            case TIMEOUT:
-                HintsServiceMetrics.hintsTimedOut.mark();
-                break;
-        }
+        return Action.CONTINUE;
     }
 
     /*
      * Sending hints in compatibility mode.
      */
-
     private <T> Action sendHints(Iterator<T> hints, Collection<Callback> callbacks, Function<T, Callback> sendFunction)
     {
         while (hints.hasNext())
         {
-            if (abortRequested.getAsBoolean())
+            if (!isHostAlive() || isPaused())
                 return Action.ABORT;
             callbacks.add(sendFunction.apply(hints.next()));
         }
@@ -178,7 +165,7 @@ final class HintsDispatcher implements AutoCloseable
 
     private Callback sendHint(Hint hint)
     {
-        Callback callback = new Callback(hint.creationTime);
+        Callback callback = new Callback();
         HintMessage message = new HintMessage(hostId, hint);
         MessagingService.instance().sendRRWithFailure(message.createMessageOut(), address, callback);
         return callback;
@@ -190,29 +177,23 @@ final class HintsDispatcher implements AutoCloseable
 
     private Callback sendEncodedHint(ByteBuffer hint)
     {
+        Callback callback = new Callback();
         EncodedHintMessage message = new EncodedHintMessage(hostId, hint, messagingVersion);
-        Callback callback = new Callback(message.getHintCreationTime());
         MessagingService.instance().sendRRWithFailure(message.createMessageOut(), address, callback);
         return callback;
     }
 
     private static final class Callback implements IAsyncCallbackWithFailure
     {
-        enum Outcome { SUCCESS, TIMEOUT, FAILURE, INTERRUPTED }
+        enum Outcome { SUCCESS, TIMEOUT, FAILURE }
 
         private final long start = System.nanoTime();
         private final SimpleCondition condition = new SimpleCondition();
         private volatile Outcome outcome;
-        private final long hintCreationTime;
-
-        private Callback(long hintCreationTime)
-        {
-            this.hintCreationTime = hintCreationTime;
-        }
 
         Outcome await()
         {
-            long timeout = TimeUnit.MILLISECONDS.toNanos(MessagingService.Verb.HINT.getTimeout()) - (System.nanoTime() - start);
+            long timeout = TimeUnit.MILLISECONDS.toNanos(DatabaseDescriptor.getTimeout(MessagingService.Verb.HINT)) - (System.nanoTime() - start);
             boolean timedOut;
 
             try
@@ -221,14 +202,13 @@ final class HintsDispatcher implements AutoCloseable
             }
             catch (InterruptedException e)
             {
-                logger.warn("Hint dispatch was interrupted", e);
-                return Outcome.INTERRUPTED;
+                throw new AssertionError(e);
             }
 
             return timedOut ? Outcome.TIMEOUT : outcome;
         }
 
-        public void onFailure(InetAddress from, RequestFailureReason failureReason)
+        public void onFailure(InetAddress from)
         {
             outcome = Outcome.FAILURE;
             condition.signalAll();
@@ -236,7 +216,6 @@ final class HintsDispatcher implements AutoCloseable
 
         public void response(MessageIn msg)
         {
-            HintsServiceMetrics.updateDelayMetrics(msg.from, ApproximateTime.currentTimeMillis() - this.hintCreationTime);
             outcome = Outcome.SUCCESS;
             condition.signalAll();
         }
@@ -244,12 +223,6 @@ final class HintsDispatcher implements AutoCloseable
         public boolean isLatencyForSnitch()
         {
             return false;
-        }
-
-        @Override
-        public boolean supportsBackPressure()
-        {
-            return true;
         }
     }
 }

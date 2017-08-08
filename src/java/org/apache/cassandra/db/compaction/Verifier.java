@@ -42,7 +42,6 @@ import java.io.IOError;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.function.Predicate;
 
 public class Verifier implements Closeable
 {
@@ -63,17 +62,17 @@ public class Verifier implements Closeable
     private final OutputHandler outputHandler;
     private FileDigestValidator validator;
 
-    public Verifier(ColumnFamilyStore cfs, SSTableReader sstable, boolean isOffline)
+    public Verifier(ColumnFamilyStore cfs, SSTableReader sstable, boolean isOffline) throws IOException
     {
         this(cfs, sstable, new OutputHandler.LogOutput(), isOffline);
     }
 
-    public Verifier(ColumnFamilyStore cfs, SSTableReader sstable, OutputHandler outputHandler, boolean isOffline)
+    public Verifier(ColumnFamilyStore cfs, SSTableReader sstable, OutputHandler outputHandler, boolean isOffline) throws IOException
     {
         this.cfs = cfs;
         this.sstable = sstable;
         this.outputHandler = outputHandler;
-        this.rowIndexEntrySerializer = sstable.descriptor.version.getSSTableFormat().getIndexSerializer(cfs.metadata(), sstable.descriptor.version, sstable.header);
+        this.rowIndexEntrySerializer = sstable.descriptor.version.getSSTableFormat().getIndexSerializer(sstable.metadata, sstable.descriptor.version, sstable.header);
 
         this.controller = new VerifyController(cfs);
 
@@ -88,7 +87,7 @@ public class Verifier implements Closeable
     {
         long rowStart = 0;
 
-        outputHandler.output(String.format("Verifying %s (%s)", sstable, FBUtilities.prettyPrintMemory(dataFile.length())));
+        outputHandler.output(String.format("Verifying %s (%s bytes)", sstable, dataFile.length()));
         outputHandler.output(String.format("Checking computed hash of %s ", sstable));
 
 
@@ -97,7 +96,8 @@ public class Verifier implements Closeable
         {
             validator = null;
 
-            if (new File(sstable.descriptor.filenameFor(Component.DIGEST)).exists())
+            if (sstable.descriptor.digestComponent != null &&
+                new File(sstable.descriptor.filenameFor(sstable.descriptor.digestComponent)).exists())
             {
                 validator = DataIntegrityMetadata.fileDigestValidator(sstable.descriptor);
                 validator.validate();
@@ -128,7 +128,7 @@ public class Verifier implements Closeable
         {
             ByteBuffer nextIndexKey = ByteBufferUtil.readWithShortLength(indexFile);
             {
-                long firstRowPositionFromIndex = rowIndexEntrySerializer.deserializePositionAndSkip(indexFile);
+                long firstRowPositionFromIndex = rowIndexEntrySerializer.deserialize(indexFile).position;
                 if (firstRowPositionFromIndex != 0)
                     markAndThrow();
             }
@@ -162,7 +162,7 @@ public class Verifier implements Closeable
                     nextIndexKey = indexFile.isEOF() ? null : ByteBufferUtil.readWithShortLength(indexFile);
                     nextRowPositionFromIndex = indexFile.isEOF()
                                              ? dataFile.length()
-                                             : rowIndexEntrySerializer.deserializePositionAndSkip(indexFile);
+                                             : rowIndexEntrySerializer.deserialize(indexFile).position;
                 }
                 catch (Throwable th)
                 {
@@ -177,7 +177,7 @@ public class Verifier implements Closeable
                 long dataSize = nextRowPositionFromIndex - dataStartFromIndex;
                 // avoid an NPE if key is null
                 String keyName = key == null ? "(unreadable key)" : ByteBufferUtil.bytesToHex(key.getKey());
-                outputHandler.debug(String.format("row %s is %s", keyName, FBUtilities.prettyPrintMemory(dataSize)));
+                outputHandler.debug(String.format("row %s is %s bytes", keyName, dataSize));
 
                 assert currentIndexKey != null || indexFile.isEOF();
 
@@ -187,7 +187,7 @@ public class Verifier implements Closeable
                         markAndThrow();
 
                     //mimic the scrub read path
-                    try (UnfilteredRowIterator iterator = SSTableIdentityIterator.create(sstable, dataFile, key))
+                    try (UnfilteredRowIterator iterator = new SSTableIdentityIterator(sstable, dataFile, key))
                     {
                     }
 
@@ -234,7 +234,7 @@ public class Verifier implements Closeable
 
     private void markAndThrow() throws IOException
     {
-        sstable.descriptor.getMetadataSerializer().mutateRepaired(sstable.descriptor, ActiveRepairService.UNREPAIRED_SSTABLE, sstable.getSSTableMetadata().pendingRepair);
+        sstable.descriptor.getMetadataSerializer().mutateRepairedAt(sstable.descriptor, ActiveRepairService.UNREPAIRED_SSTABLE);
         throw new CorruptSSTableException(new Exception(String.format("Invalid SSTable %s, please force repair", sstable.getFilename())), sstable.getFilename());
     }
 
@@ -260,7 +260,7 @@ public class Verifier implements Closeable
         {
             try
             {
-                return new CompactionInfo(sstable.metadata(),
+                return new CompactionInfo(sstable.metadata,
                                           OperationType.VERIFY,
                                           dataFile.getFilePointer(),
                                           dataFile.length(),
@@ -281,9 +281,9 @@ public class Verifier implements Closeable
         }
 
         @Override
-        public Predicate<Long> getPurgeEvaluator(DecoratedKey key)
+        public long maxPurgeableTimestamp(DecoratedKey key)
         {
-            return time -> false;
+            return Long.MIN_VALUE;
         }
     }
 }

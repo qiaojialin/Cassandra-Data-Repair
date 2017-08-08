@@ -19,7 +19,6 @@ package org.apache.cassandra.metrics;
 
 import java.util.Set;
 
-import com.codahale.metrics.Counter;
 import com.codahale.metrics.Gauge;
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Timer;
@@ -92,37 +91,13 @@ public class KeyspaceMetrics
     public final LatencyMetrics casPropose;
     /** CAS Commit metrics */
     public final LatencyMetrics casCommit;
-    /** Writes failed ideal consistency **/
-    public final Counter writeFailedIdealCL;
-    /** Ideal CL write latency metrics */
-    public final LatencyMetrics idealCLWriteLatency;
-    /** Speculative retries **/
-    public final Counter speculativeRetries;
-    /** Speculative retry occured but still timed out **/
-    public final Counter speculativeFailedRetries;
-    /** Needed to speculate, but didn't have enough replicas **/
-    public final Counter speculativeInsufficientReplicas;
-    /** total time spent as a repair coordinator */
-    public final Timer repairTime;
-    /** total time spent preparing for repair */
-    public final Timer repairPrepareTime;
-    /** Time spent anticompacting */
-    public final Timer anticompactionTime;
-    /** total time spent creating merkle trees */
-    public final Timer validationTime;
-    /** total time spent syncing data after repair */
-    public final Timer repairSyncTime;
-    /** histogram over the number of bytes we have validated */
-    public final Histogram bytesValidated;
-    /** histogram over the number of partitions we have validated */
-    public final Histogram partitionsValidated;
 
     public final MetricNameFactory factory;
     private Keyspace keyspace;
-
+    
     /** set containing names of all the metrics stored here, for releasing later */
     private Set<String> allMetrics = Sets.newHashSet();
-
+    
     /**
      * Creates metrics for given {@link ColumnFamilyStore}.
      *
@@ -145,7 +120,7 @@ public class KeyspaceMetrics
             {
                 return metric.memtableLiveDataSize.getValue();
             }
-        });
+        }); 
         memtableOnHeapDataSize = createKeyspaceGauge("MemtableOnHeapDataSize", new MetricValue()
         {
             public Long getValue(TableMetrics metric)
@@ -261,37 +236,6 @@ public class KeyspaceMetrics
         casPrepare = new LatencyMetrics(factory, "CasPrepare");
         casPropose = new LatencyMetrics(factory, "CasPropose");
         casCommit = new LatencyMetrics(factory, "CasCommit");
-        writeFailedIdealCL = Metrics.counter(factory.createMetricName("WriteFailedIdealCL"));
-        idealCLWriteLatency = new LatencyMetrics(factory, "IdealCLWrite");
-
-        speculativeRetries = createKeyspaceCounter("SpeculativeRetries", new MetricValue()
-        {
-            public Long getValue(TableMetrics metric)
-            {
-                return metric.speculativeRetries.getCount();
-            }
-        });
-        speculativeFailedRetries = createKeyspaceCounter("SpeculativeFailedRetries", new MetricValue()
-        {
-            public Long getValue(TableMetrics metric)
-            {
-                return metric.speculativeFailedRetries.getCount();
-            }
-        });
-        speculativeInsufficientReplicas = createKeyspaceCounter("SpeculativeInsufficientReplicas", new MetricValue()
-        {
-            public Long getValue(TableMetrics metric)
-            {
-                return metric.speculativeInsufficientReplicas.getCount();
-            }
-        });
-        repairTime = Metrics.timer(factory.createMetricName("RepairTime"));
-        repairPrepareTime = Metrics.timer(factory.createMetricName("RepairPrepareTime"));
-        anticompactionTime = Metrics.timer(factory.createMetricName("AntiCompactionTime"));
-        validationTime = Metrics.timer(factory.createMetricName("ValidationTime"));
-        repairSyncTime = Metrics.timer(factory.createMetricName("RepairSyncTime"));
-        partitionsValidated = Metrics.histogram(factory.createMetricName("PartitionsValidated"), false);
-        bytesValidated = Metrics.histogram(factory.createMetricName("BytesValidated"), false);
     }
 
     /**
@@ -299,7 +243,7 @@ public class KeyspaceMetrics
      */
     public void release()
     {
-        for(String name : allMetrics)
+        for(String name : allMetrics) 
         {
             Metrics.remove(factory.createMetricName(name));
         }
@@ -307,9 +251,8 @@ public class KeyspaceMetrics
         readLatency.release();
         writeLatency.release();
         rangeLatency.release();
-        idealCLWriteLatency.release();
     }
-
+    
     /**
      * Represents a column family metric value.
      */
@@ -335,30 +278,6 @@ public class KeyspaceMetrics
         return Metrics.register(factory.createMetricName(name), new Gauge<Long>()
         {
             public Long getValue()
-            {
-                long sum = 0;
-                for (ColumnFamilyStore cf : keyspace.getColumnFamilyStores())
-                {
-                    sum += extractor.getValue(cf.metric);
-                }
-                return sum;
-            }
-        });
-    }
-
-    /**
-     * Creates a counter that will sum the current value of a metric for all column families in this keyspace
-     * @param name
-     * @param extractor
-     * @return Counter that computes sum of MetricValue.getValue()
-     */
-    private Counter createKeyspaceCounter(String name, final MetricValue extractor)
-    {
-        allMetrics.add(name);
-        return Metrics.register(factory.createMetricName(name), new Counter()
-        {
-            @Override
-            public long getCount()
             {
                 long sum = 0;
                 for (ColumnFamilyStore cf : keyspace.getColumnFamilyStores())

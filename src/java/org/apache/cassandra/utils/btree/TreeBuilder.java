@@ -20,8 +20,6 @@ package org.apache.cassandra.utils.btree;
 
 import java.util.Comparator;
 
-import io.netty.util.Recycler;
-
 import static org.apache.cassandra.utils.btree.BTree.EMPTY_LEAF;
 import static org.apache.cassandra.utils.btree.BTree.FAN_SHIFT;
 import static org.apache.cassandra.utils.btree.BTree.POSITIVE_INFINITY;
@@ -30,31 +28,11 @@ import static org.apache.cassandra.utils.btree.BTree.POSITIVE_INFINITY;
  * A class for constructing a new BTree, either from an existing one and some set of modifications
  * or a new tree from a sorted collection of items.
  * <p/>
- * This is a fairly heavy-weight object, so a Recycled instance is created for making modifications to a tree
+ * This is a fairly heavy-weight object, so a ThreadLocal instance is created for making modifications to a tree
  */
 final class TreeBuilder
 {
-
-    private final static Recycler<TreeBuilder> builderRecycler = new Recycler<TreeBuilder>()
-    {
-        protected TreeBuilder newObject(Handle handle)
-        {
-            return new TreeBuilder(handle);
-        }
-    };
-
-    public static TreeBuilder newInstance()
-    {
-        return builderRecycler.get();
-    }
-
-    private final Recycler.Handle recycleHandle;
     private final NodeBuilder rootBuilder = new NodeBuilder();
-
-    private TreeBuilder(Recycler.Handle handle)
-    {
-        this.recycleHandle = handle;
-    }
 
     /**
      * At the highest level, we adhere to the classic b-tree insertion algorithm:
@@ -115,9 +93,6 @@ final class TreeBuilder
 
         Object[] r = current.toNode();
         current.clear();
-
-        builderRecycler.recycle(this, recycleHandle);
-
         return r;
     }
 
@@ -139,9 +114,6 @@ final class TreeBuilder
 
         Object[] r = current.toNode();
         current.clear();
-
-        builderRecycler.recycle(this, recycleHandle);
-
         return r;
     }
 }

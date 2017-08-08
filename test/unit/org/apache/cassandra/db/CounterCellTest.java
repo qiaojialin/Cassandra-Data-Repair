@@ -28,9 +28,10 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.db.rows.BufferCell;
 import org.apache.cassandra.db.rows.Cell;
+import org.apache.cassandra.db.rows.CellPath;
 import org.apache.cassandra.db.rows.Cells;
 import org.apache.cassandra.db.context.CounterContext;
 import org.apache.cassandra.exceptions.ConfigurationException;
@@ -98,27 +99,27 @@ public class CounterCellTest
 
     private Cell createLegacyCounterCell(ColumnFamilyStore cfs, ByteBuffer colName, long count, long ts)
     {
-        ColumnMetadata cDef = cfs.metadata().getColumn(colName);
+        ColumnDefinition cDef = cfs.metadata.getColumnDefinition(colName);
         ByteBuffer val = CounterContext.instance().createLocal(count);
-        return BufferCell.live(cDef, ts, val);
+        return BufferCell.live(cfs.metadata, cDef, ts, val);
     }
 
     private Cell createCounterCell(ColumnFamilyStore cfs, ByteBuffer colName, CounterId id, long count, long ts)
     {
-        ColumnMetadata cDef = cfs.metadata().getColumn(colName);
+        ColumnDefinition cDef = cfs.metadata.getColumnDefinition(colName);
         ByteBuffer val = CounterContext.instance().createGlobal(id, ts, count);
-        return BufferCell.live(cDef, ts, val);
+        return BufferCell.live(cfs.metadata, cDef, ts, val);
     }
 
     private Cell createCounterCellFromContext(ColumnFamilyStore cfs, ByteBuffer colName, ContextState context, long ts)
     {
-        ColumnMetadata cDef = cfs.metadata().getColumn(colName);
-        return BufferCell.live(cDef, ts, context.context);
+        ColumnDefinition cDef = cfs.metadata.getColumnDefinition(colName);
+        return BufferCell.live(cfs.metadata, cDef, ts, context.context);
     }
 
     private Cell createDeleted(ColumnFamilyStore cfs, ByteBuffer colName, long ts, int localDeletionTime)
     {
-        ColumnMetadata cDef = cfs.metadata().getColumn(colName);
+        ColumnDefinition cDef = cfs.metadata.getColumnDefinition(colName);
         return BufferCell.tombstone(cDef, ts, localDeletionTime);
     }
 
@@ -272,8 +273,8 @@ public class CounterCellTest
 
         Cell original = createCounterCellFromContext(cfs, col, state, 5);
 
-        ColumnMetadata cDef = cfs.metadata().getColumn(col);
-        Cell cleared = BufferCell.live(cDef, 5, CounterContext.instance().clearAllLocal(state.context));
+        ColumnDefinition cDef = cfs.metadata.getColumnDefinition(col);
+        Cell cleared = BufferCell.live(cfs.metadata, cDef, 5, CounterContext.instance().clearAllLocal(state.context));
 
         CounterContext.instance().updateDigest(digest1, original.value());
         CounterContext.instance().updateDigest(digest2, cleared.value());

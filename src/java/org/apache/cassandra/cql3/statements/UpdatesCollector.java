@@ -20,8 +20,7 @@ package org.apache.cassandra.cql3.statements;
 import java.nio.ByteBuffer;
 import java.util.*;
 
-import org.apache.cassandra.schema.TableId;
-import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 
@@ -37,7 +36,7 @@ final class UpdatesCollector
     /**
      * The columns that will be updated for each table (keyed by the table ID).
      */
-    private final Map<TableId, RegularAndStaticColumns> updatedColumns;
+    private final Map<UUID, PartitionColumns> updatedColumns;
 
     /**
      * The estimated number of updated row.
@@ -49,7 +48,7 @@ final class UpdatesCollector
      */
     private final Map<String, Map<ByteBuffer, IMutation>> mutations = new HashMap<>();
 
-    public UpdatesCollector(Map<TableId, RegularAndStaticColumns> updatedColumns, int updatedRows)
+    public UpdatesCollector(Map<UUID, PartitionColumns> updatedColumns, int updatedRows)
     {
         super();
         this.updatedColumns = updatedColumns;
@@ -60,20 +59,20 @@ final class UpdatesCollector
      * Gets the <code>PartitionUpdate</code> for the specified column family and key. If the update does not
      * exist it will be created.
      *
-     * @param metadata the column family meta data
+     * @param cfm the column family meta data
      * @param dk the partition key
      * @param consistency the consistency level
      * @return the <code>PartitionUpdate</code> for the specified column family and key
      */
-    public PartitionUpdate getPartitionUpdate(TableMetadata metadata, DecoratedKey dk, ConsistencyLevel consistency)
+    public PartitionUpdate getPartitionUpdate(CFMetaData cfm, DecoratedKey dk, ConsistencyLevel consistency)
     {
-        Mutation mut = getMutation(metadata, dk, consistency);
-        PartitionUpdate upd = mut.get(metadata);
+        Mutation mut = getMutation(cfm, dk, consistency);
+        PartitionUpdate upd = mut.get(cfm);
         if (upd == null)
         {
-            RegularAndStaticColumns columns = updatedColumns.get(metadata.id);
+            PartitionColumns columns = updatedColumns.get(cfm.cfId);
             assert columns != null;
-            upd = new PartitionUpdate(metadata, dk, columns, updatedRows);
+            upd = new PartitionUpdate(cfm, dk, columns, updatedRows);
             mut.add(upd);
         }
         return upd;
@@ -91,18 +90,18 @@ final class UpdatesCollector
                     Keyspace.openAndGetStore(update.metadata()).indexManager.validate(update);
     }
 
-    private Mutation getMutation(TableMetadata metadata, DecoratedKey dk, ConsistencyLevel consistency)
+    private Mutation getMutation(CFMetaData cfm, DecoratedKey dk, ConsistencyLevel consistency)
     {
-        String ksName = metadata.keyspace;
+        String ksName = cfm.ksName;
         IMutation mutation = keyspaceMap(ksName).get(dk.getKey());
         if (mutation == null)
         {
             Mutation mut = new Mutation(ksName, dk);
-            mutation = metadata.isCounter() ? new CounterMutation(mut, consistency) : mut;
+            mutation = cfm.isCounter() ? new CounterMutation(mut, consistency) : mut;
             keyspaceMap(ksName).put(dk.getKey(), mutation);
             return mut;
         }
-        return metadata.isCounter() ? ((CounterMutation) mutation).getMutation() : (Mutation) mutation;
+        return cfm.isCounter() ? ((CounterMutation) mutation).getMutation() : (Mutation) mutation;
     }
 
     /**

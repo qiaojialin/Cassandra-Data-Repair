@@ -20,7 +20,6 @@ package org.apache.cassandra.schema;
 import java.util.HashMap;
 import java.util.Map;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Objects;
 import com.google.common.collect.ImmutableMap;
 import org.apache.commons.lang3.StringUtils;
@@ -54,8 +53,7 @@ public final class CachingParams
     public static final CachingParams CACHE_KEYS = new CachingParams(true, 0);
     public static final CachingParams CACHE_EVERYTHING = new CachingParams(true, Integer.MAX_VALUE);
 
-    @VisibleForTesting
-    public static CachingParams DEFAULT = new CachingParams(DEFAULT_CACHE_KEYS, DEFAULT_ROWS_PER_PARTITION_TO_CACHE);
+    static final CachingParams DEFAULT = new CachingParams(DEFAULT_CACHE_KEYS, DEFAULT_ROWS_PER_PARTITION_TO_CACHE);
 
     final boolean cacheKeys;
     final int rowsPerPartitionToCache;

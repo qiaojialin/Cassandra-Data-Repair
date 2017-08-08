@@ -34,29 +34,16 @@ import org.apache.commons.lang3.ArrayUtils;
 @Command(name = "tablehistograms", description = "Print statistic histograms for a given table")
 public class TableHistograms extends NodeToolCmd
 {
-    @Arguments(usage = "<keyspace> <table> | <keyspace.table>", description = "The keyspace and table name")
+    @Arguments(usage = "<keyspace> <table>", description = "The keyspace and table name")
     private List<String> args = new ArrayList<>();
 
     @Override
     public void execute(NodeProbe probe)
     {
-        String keyspace = null, table = null;
-        if (args.size() == 2)
-        {
-            keyspace = args.get(0);
-            table = args.get(1);
-        }
-        else if (args.size() == 1)
-        {
-            String[] input = args.get(0).split("\\.");
-            checkArgument(input.length == 2, "tablehistograms requires keyspace and table name arguments");
-            keyspace = input[0];
-            table = input[1];
-        }
-        else
-        {
-            checkArgument(false, "tablehistograms requires keyspace and table name arguments");
-        }
+        checkArgument(args.size() == 2, "tablehistograms requires keyspace and table name arguments");
+
+        String keyspace = args.get(0);
+        String table = args.get(1);
 
         // calculate percentile of row size and column count
         long[] estimatedPartitionSize = (long[]) probe.getColumnFamilyMetric(keyspace, table, "EstimatedPartitionSizeHistogram");
@@ -79,12 +66,14 @@ public class TableHistograms extends NodeToolCmd
         }
         else
         {
-            EstimatedHistogram partitionSizeHist = new EstimatedHistogram(estimatedPartitionSize);
-            EstimatedHistogram columnCountHist = new EstimatedHistogram(estimatedColumnCount);
+            long[] partitionSizeBucketOffsets = new EstimatedHistogram(estimatedPartitionSize.length).getBucketOffsets();
+            long[] columnCountBucketOffsets = new EstimatedHistogram(estimatedColumnCount.length).getBucketOffsets();
+            EstimatedHistogram partitionSizeHist = new EstimatedHistogram(partitionSizeBucketOffsets, estimatedPartitionSize);
+            EstimatedHistogram columnCountHist = new EstimatedHistogram(columnCountBucketOffsets, estimatedColumnCount);
 
             if (partitionSizeHist.isOverflowed())
             {
-                System.err.println(String.format("Row sizes are larger than %s, unable to calculate percentiles", partitionSizeHist.getLargestBucketOffset()));
+                System.err.println(String.format("Row sizes are larger than %s, unable to calculate percentiles", partitionSizeBucketOffsets[partitionSizeBucketOffsets.length - 1]));
                 for (int i = 0; i < offsetPercentiles.length; i++)
                         estimatedRowSizePercentiles[i] = Double.NaN;
             }
@@ -96,7 +85,7 @@ public class TableHistograms extends NodeToolCmd
 
             if (columnCountHist.isOverflowed())
             {
-                System.err.println(String.format("Column counts are larger than %s, unable to calculate percentiles", columnCountHist.getLargestBucketOffset()));
+                System.err.println(String.format("Column counts are larger than %s, unable to calculate percentiles", columnCountBucketOffsets[columnCountBucketOffsets.length - 1]));
                 for (int i = 0; i < estimatedColumnCountPercentiles.length; i++)
                     estimatedColumnCountPercentiles[i] = Double.NaN;
             }

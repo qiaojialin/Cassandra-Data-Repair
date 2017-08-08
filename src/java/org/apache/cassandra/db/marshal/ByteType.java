@@ -25,10 +25,9 @@ import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.serializers.ByteSerializer;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.serializers.TypeSerializer;
-import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
-public class ByteType extends NumberType<Byte>
+public class ByteType extends AbstractType<Byte>
 {
     public static final ByteType instance = new ByteType();
 
@@ -64,15 +63,26 @@ public class ByteType extends NumberType<Byte>
 
     public Term fromJSONObject(Object parsed) throws MarshalException
     {
-        if (parsed instanceof String || parsed instanceof Number)
-            return new Constants.Value(fromString(String.valueOf(parsed)));
+        try
+        {
+            if (parsed instanceof String)
+                return new Constants.Value(fromString((String) parsed));
 
-        throw new MarshalException(String.format(
-                "Expected a byte value, but got a %s: %s", parsed.getClass().getSimpleName(), parsed));
+            Number parsedNumber = (Number) parsed;
+            if (!(parsedNumber instanceof Byte))
+                throw new MarshalException(String.format("Expected a byte value, but got a %s: %s", parsed.getClass().getSimpleName(), parsed));
+
+            return new Constants.Value(getSerializer().serialize(parsedNumber.byteValue()));
+        }
+        catch (ClassCastException exc)
+        {
+            throw new MarshalException(String.format(
+                    "Expected a byte value, but got a %s: %s", parsed.getClass().getSimpleName(), parsed));
+        }
     }
 
     @Override
-    public String toJSONString(ByteBuffer buffer, ProtocolVersion protocolVersion)
+    public String toJSONString(ByteBuffer buffer, int protocolVersion)
     {
         return getSerializer().deserialize(buffer).toString();
     }
@@ -87,53 +97,5 @@ public class ByteType extends NumberType<Byte>
     public TypeSerializer<Byte> getSerializer()
     {
         return ByteSerializer.instance;
-    }
-
-    @Override
-    public byte toByte(ByteBuffer value)
-    {
-        return ByteBufferUtil.toByte(value);
-    }
-
-    @Override
-    public short toShort(ByteBuffer value)
-    {
-        return toByte(value);
-    }
-
-    @Override
-    protected int toInt(ByteBuffer value)
-    {
-        return toByte(value);
-    }
-
-    public ByteBuffer add(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
-    {
-        return ByteBufferUtil.bytes((byte) (leftType.toByte(left) + rightType.toByte(right)));
-    }
-
-    public ByteBuffer substract(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
-    {
-        return ByteBufferUtil.bytes((byte) (leftType.toByte(left) - rightType.toByte(right)));
-    }
-
-    public ByteBuffer multiply(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
-    {
-        return ByteBufferUtil.bytes((byte) (leftType.toByte(left) * rightType.toByte(right)));
-    }
-
-    public ByteBuffer divide(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
-    {
-        return ByteBufferUtil.bytes((byte) (leftType.toByte(left) / rightType.toByte(right)));
-    }
-
-    public ByteBuffer mod(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
-    {
-        return ByteBufferUtil.bytes((byte) (leftType.toByte(left) % rightType.toByte(right)));
-    }
-
-    public ByteBuffer negate(ByteBuffer input)
-    {
-        return ByteBufferUtil.bytes((byte) -toByte(input));
     }
 }

@@ -22,9 +22,6 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Collection;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import com.ning.compress.lzf.LZFOutputStream;
 
 import org.apache.cassandra.io.sstable.Component;
@@ -32,9 +29,9 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.DataIntegrityMetadata;
 import org.apache.cassandra.io.util.DataIntegrityMetadata.ChecksumValidator;
 import org.apache.cassandra.io.util.DataOutputStreamPlus;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.streaming.StreamManager.StreamRateLimiter;
-import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 
 /**
@@ -43,8 +40,6 @@ import org.apache.cassandra.utils.Pair;
 public class StreamWriter
 {
     private static final int DEFAULT_CHUNK_SIZE = 64 * 1024;
-
-    private static final Logger logger = LoggerFactory.getLogger(StreamWriter.class);
 
     protected final SSTableReader sstable;
     protected final Collection<Pair<Long, Long>> sections;
@@ -75,8 +70,7 @@ public class StreamWriter
     public void write(DataOutputStreamPlus output) throws IOException
     {
         long totalSize = totalSize();
-        logger.debug("[Stream #{}] Start streaming file {} to {}, repairedAt = {}, totalSize = {}", session.planId(),
-                     sstable.getFilename(), session.peer, sstable.getSSTableMetadata().repairedAt, totalSize);
+
 
         try(RandomAccessReader file = sstable.openDataReader();
             ChecksumValidator validator = new File(sstable.descriptor.filenameFor(Component.CRC)).exists()
@@ -108,15 +102,13 @@ public class StreamWriter
                     long lastBytesRead = write(file, validator, readOffset, length, bytesRead);
                     bytesRead += lastBytesRead;
                     progress += (lastBytesRead - readOffset);
-                    session.progress(sstable.descriptor.filenameFor(Component.DATA), ProgressInfo.Direction.OUT, progress, totalSize);
+                    session.progress(sstable.descriptor, ProgressInfo.Direction.OUT, progress, totalSize);
                     readOffset = 0;
                 }
 
                 // make sure that current section is sent
                 compressedOutput.flush();
             }
-            logger.debug("[Stream #{}] Finished streaming file {} to {}, bytesTransferred = {}, totalSize = {}",
-                         session.planId(), sstable.getFilename(), session.peer, FBUtilities.prettyPrintMemory(progress), FBUtilities.prettyPrintMemory(totalSize));
         }
     }
 

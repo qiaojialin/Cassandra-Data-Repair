@@ -193,22 +193,4 @@ public class TupleTypeTest extends CQLTester
                    row(0, 0, "b"),
                    row(0, 0, "c"));
     }
-
-    @Test
-    public void testInvalidInputForTuple() throws Throwable
-    {
-        createTable("CREATE TABLE %s(pk int PRIMARY KEY, t tuple<text, text>)");
-        assertInvalidMessage("Not enough bytes to read 0th component",
-                             "INSERT INTO %s (pk, t) VALUES (?, ?)", 1, "test");
-        assertInvalidMessage("Not enough bytes to read 0th component",
-                             "INSERT INTO %s (pk, t) VALUES (?, ?)", 1, Long.MAX_VALUE);
-    }
-
-    @Test
-    public void testTupleModification() throws Throwable
-    {
-        createTable("CREATE TABLE %s(pk int PRIMARY KEY, value tuple<int, int>)");
-        assertInvalidMessage("Invalid operation (value = value + (1, 1)) for tuple column value",
-                             "UPDATE %s SET value += (1, 1) WHERE k=0;");
-    }
 }

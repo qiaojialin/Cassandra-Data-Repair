@@ -35,7 +35,7 @@ public class NetStats extends NodeToolCmd
 {
     @Option(title = "human_readable",
             name = {"-H", "--human-readable"},
-            description = "Display bytes in human readable form, i.e. KiB, MiB, GiB, TiB")
+            description = "Display bytes in human readable form, i.e. KB, MB, GB, TB")
     private boolean humanReadable = false;
 
     @Override
@@ -47,7 +47,7 @@ public class NetStats extends NodeToolCmd
             System.out.println("Not sending any streams.");
         for (StreamState status : statuses)
         {
-            System.out.printf("%s %s%n", status.streamOperation.getDescription(), status.planId.toString());
+            System.out.printf("%s %s%n", status.description, status.planId.toString());
             for (SessionInfo info : status.sessions)
             {
                 System.out.printf("    %s", info.peer.toString());
@@ -90,12 +90,10 @@ public class NetStats extends NodeToolCmd
             System.out.printf("%-25s", "Pool Name");
             System.out.printf("%10s", "Active");
             System.out.printf("%10s", "Pending");
-            System.out.printf("%15s", "Completed");
-            System.out.printf("%10s%n", "Dropped");
+            System.out.printf("%15s%n", "Completed");
 
             int pending;
             long completed;
-            long dropped;
 
             pending = 0;
             for (int n : ms.getLargeMessagePendingTasks().values())
@@ -103,10 +101,7 @@ public class NetStats extends NodeToolCmd
             completed = 0;
             for (long n : ms.getLargeMessageCompletedTasks().values())
                 completed += n;
-            dropped = 0;
-            for (long n : ms.getLargeMessageDroppedTasks().values())
-                dropped += n;
-            System.out.printf("%-25s%10s%10s%15s%10s%n", "Large messages", "n/a", pending, completed, dropped);
+            System.out.printf("%-25s%10s%10s%15s%n", "Large messages", "n/a", pending, completed);
 
             pending = 0;
             for (int n : ms.getSmallMessagePendingTasks().values())
@@ -114,10 +109,7 @@ public class NetStats extends NodeToolCmd
             completed = 0;
             for (long n : ms.getSmallMessageCompletedTasks().values())
                 completed += n;
-            dropped = 0;
-            for (long n : ms.getSmallMessageDroppedTasks().values())
-                dropped += n;
-            System.out.printf("%-25s%10s%10s%15s%10s%n", "Small messages", "n/a", pending, completed, dropped);
+            System.out.printf("%-25s%10s%10s%15s%n", "Small messages", "n/a", pending, completed);
 
             pending = 0;
             for (int n : ms.getGossipMessagePendingTasks().values())
@@ -125,10 +117,7 @@ public class NetStats extends NodeToolCmd
             completed = 0;
             for (long n : ms.getGossipMessageCompletedTasks().values())
                 completed += n;
-            dropped = 0;
-            for (long n : ms.getGossipMessageDroppedTasks().values())
-                dropped += n;
-            System.out.printf("%-25s%10s%10s%15s%10s%n", "Gossip messages", "n/a", pending, completed, dropped);
+            System.out.printf("%-25s%10s%10s%15s%n", "Gossip messages", "n/a", pending, completed);
         }
     }
 }

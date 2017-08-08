@@ -29,7 +29,7 @@ import org.junit.runner.RunWith;
 import org.apache.cassandra.OrderedJUnit4ClassRunner;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.exceptions.ConfigurationException;
@@ -37,7 +37,6 @@ import org.apache.cassandra.dht.*;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.schema.KeyspaceParams;
-import org.apache.cassandra.schema.MigrationManager;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -61,10 +60,6 @@ public class CompactionsTest
     {
         Map<String, String> compactionOptions = new HashMap<>();
         compactionOptions.put("tombstone_compaction_interval", "1");
-
-        // Disable tombstone histogram rounding for tests
-        System.setProperty("cassandra.streaminghistogram.roundseconds", "1");
-
         SchemaLoader.prepareServer();
 
         SchemaLoader.createKeyspace(KEYSPACE1,
@@ -87,7 +82,7 @@ public class CompactionsTest
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
         ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF_DENSE1);
         store.clearUnsafe();
-        MigrationManager.announceTableUpdate(store.metadata().unbuild().gcGraceSeconds(1).build(), true);
+        store.metadata.gcGraceSeconds(1);
 
         // disable compaction while flushing
         store.disableAutoCompaction();
@@ -120,10 +115,10 @@ public class CompactionsTest
         return store;
     }
 
-    public static long populate(String ks, String cf, int startRowKey, int endRowKey, int ttl)
+    private long populate(String ks, String cf, int startRowKey, int endRowKey, int ttl)
     {
         long timestamp = System.currentTimeMillis();
-        TableMetadata cfm = Keyspace.open(ks).getColumnFamilyStore(cf).metadata();
+        CFMetaData cfm = Keyspace.open(ks).getColumnFamilyStore(cf).metadata;
         for (int i = startRowKey; i <= endRowKey; i++)
         {
             DecoratedKey key = Util.dk(Integer.toString(i));
@@ -161,21 +156,21 @@ public class CompactionsTest
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
         ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Super1");
-        CFMetaData table = cfs.metadata;
+        CFMetaData cfm = cfs.metadata;
         cfs.disableAutoCompaction();
 
         DecoratedKey key = Util.dk("tskey");
         ByteBuffer scName = ByteBufferUtil.bytes("TestSuperColumn");
 
         // a subcolumn
-        new RowUpdateBuilder(table, FBUtilities.timestampMicros(), key.getKey())
+        new RowUpdateBuilder(cfm, FBUtilities.timestampMicros(), key.getKey())
             .clustering(ByteBufferUtil.bytes("cols"))
             .add("val", "val1")
             .build().applyUnsafe();
         cfs.forceBlockingFlush();
 
         // shadow the subcolumn with a supercolumn tombstone
-        RowUpdateBuilder.deleteRow(table, FBUtilities.timestampMicros(), key.getKey(), ByteBufferUtil.bytes("cols")).applyUnsafe();
+        RowUpdateBuilder.deleteRow(cfm, FBUtilities.timestampMicros(), key.getKey(), ByteBufferUtil.bytes("cols")).applyUnsafe();
         cfs.forceBlockingFlush();
 
         CompactionManager.instance.performMaximal(cfs);
@@ -548,7 +543,7 @@ public class CompactionsTest
     {
         long timestamp = System.currentTimeMillis();
         DecoratedKey dk = Util.dk(String.format("%03d", key));
-        new RowUpdateBuilder(Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1).metadata(), timestamp, dk.getKey())
+        new RowUpdateBuilder(Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1).metadata, timestamp, dk.getKey())
                 .add("val", "val")
                 .build()
                 .applyUnsafe();
@@ -645,16 +640,5 @@ public class CompactionsTest
                                                                        150, 199,
                                                                        200, 209,
                                                                        300, 301)));
-    }
-
-    @Test
-    public void testConcurrencySettings()
-    {
-        CompactionManager.instance.setConcurrentCompactors(2);
-        assertEquals(2, CompactionManager.instance.getCoreCompactorThreads());
-        CompactionManager.instance.setConcurrentCompactors(3);
-        assertEquals(3, CompactionManager.instance.getCoreCompactorThreads());
-        CompactionManager.instance.setConcurrentCompactors(1);
-        assertEquals(1, CompactionManager.instance.getCoreCompactorThreads());
     }
 }

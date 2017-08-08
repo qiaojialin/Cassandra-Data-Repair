@@ -48,7 +48,7 @@ public class DigestResolver extends ResponseResolver
     public PartitionIterator getData()
     {
         assert isDataPresent();
-        return UnfilteredPartitionIterators.filter(dataResponse.makeIterator(command), command.nowInSec());
+        return UnfilteredPartitionIterators.filter(dataResponse.makeIterator(command.metadata(), command), command.nowInSec());
     }
 
     /*
@@ -69,13 +69,6 @@ public class DigestResolver extends ResponseResolver
         if (logger.isTraceEnabled())
             logger.trace("resolving {} responses", responses.size());
 
-        compareResponses();
-
-        return UnfilteredPartitionIterators.filter(dataResponse.makeIterator(command), command.nowInSec());
-    }
-
-    public void compareResponses() throws DigestMismatchException
-    {
         long start = System.nanoTime();
 
         // validate digests against each other; throw immediately on mismatch.
@@ -84,7 +77,7 @@ public class DigestResolver extends ResponseResolver
         {
             ReadResponse response = message.payload;
 
-            ByteBuffer newDigest = response.digest(command);
+            ByteBuffer newDigest = response.digest(command.metadata(), command);
             if (digest == null)
                 digest = newDigest;
             else if (!digest.equals(newDigest))
@@ -94,6 +87,8 @@ public class DigestResolver extends ResponseResolver
 
         if (logger.isTraceEnabled())
             logger.trace("resolve: {} ms.", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start));
+
+        return UnfilteredPartitionIterators.filter(dataResponse.makeIterator(command.metadata(), command), command.nowInSec());
     }
 
     public boolean isDataPresent()

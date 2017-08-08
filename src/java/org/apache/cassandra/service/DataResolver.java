@@ -21,18 +21,14 @@ import java.net.InetAddress;
 import java.util.*;
 import java.util.concurrent.TimeoutException;
 
-import com.google.common.annotations.VisibleForTesting;
-
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
-import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.ClusteringIndexFilter;
-import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.filter.DataLimits;
-import org.apache.cassandra.db.filter.DataLimits.Counter;
 import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.transform.MoreRows;
@@ -44,20 +40,17 @@ import org.apache.cassandra.utils.FBUtilities;
 
 public class DataResolver extends ResponseResolver
 {
-    @VisibleForTesting
-    final List<AsyncOneResponse> repairResults = Collections.synchronizedList(new ArrayList<>());
-    private final long queryStartNanoTime;
+    private final List<AsyncOneResponse> repairResults = Collections.synchronizedList(new ArrayList<>());
 
-    public DataResolver(Keyspace keyspace, ReadCommand command, ConsistencyLevel consistency, int maxResponseCount, long queryStartNanoTime)
+    public DataResolver(Keyspace keyspace, ReadCommand command, ConsistencyLevel consistency, int maxResponseCount)
     {
         super(keyspace, command, consistency, maxResponseCount);
-        this.queryStartNanoTime = queryStartNanoTime;
     }
 
     public PartitionIterator getData()
     {
         ReadResponse response = responses.iterator().next().payload;
-        return UnfilteredPartitionIterators.filter(response.makeIterator(command), command.nowInSec());
+        return UnfilteredPartitionIterators.filter(response.makeIterator(command.metadata(), command), command.nowInSec());
     }
 
     public PartitionIterator resolve()
@@ -70,7 +63,7 @@ public class DataResolver extends ResponseResolver
         for (int i = 0; i < count; i++)
         {
             MessageIn<ReadResponse> msg = responses.get(i);
-            iters.add(msg.payload.makeIterator(command));
+            iters.add(msg.payload.makeIterator(command.metadata(), command));
             sources[i] = msg.from;
         }
 
@@ -78,15 +71,6 @@ public class DataResolver extends ResponseResolver
         // so ensure we're respecting the limit.
         DataLimits.Counter counter = command.limits().newCounter(command.nowInSec(), true);
         return counter.applyTo(mergeWithShortReadProtection(iters, sources, counter));
-    }
-
-    public void compareResponses()
-    {
-        // We need to fully consume the results to trigger read repairs if appropriate
-        try (PartitionIterator iterator = resolve())
-        {
-            PartitionIterators.consume(iterator);
-        }
     }
 
     private PartitionIterator mergeWithShortReadProtection(List<UnfilteredPartitionIterator> results, InetAddress[] sources, DataLimits.Counter resultCounter)
@@ -102,7 +86,7 @@ public class DataResolver extends ResponseResolver
         if (!command.limits().isUnlimited())
         {
             for (int i = 0; i < results.size(); i++)
-                results.set(i, Transformation.apply(results.get(i), new ShortReadProtection(sources[i], resultCounter, queryStartNanoTime)));
+                results.set(i, Transformation.apply(results.get(i), new ShortReadProtection(sources[i], resultCounter)));
         }
 
         return UnfilteredPartitionIterators.mergeAndFilter(results, command.nowInSec(), listener);
@@ -122,7 +106,7 @@ public class DataResolver extends ResponseResolver
             return new MergeListener(partitionKey, columns(versions), isReversed(versions));
         }
 
-        private RegularAndStaticColumns columns(List<UnfilteredRowIterator> versions)
+        private PartitionColumns columns(List<UnfilteredRowIterator> versions)
         {
             Columns statics = Columns.NONE;
             Columns regulars = Columns.NONE;
@@ -131,11 +115,11 @@ public class DataResolver extends ResponseResolver
                 if (iter == null)
                     continue;
 
-                RegularAndStaticColumns cols = iter.columns();
+                PartitionColumns cols = iter.columns();
                 statics = statics.mergeTo(cols.statics);
                 regulars = regulars.mergeTo(cols.regulars);
             }
-            return new RegularAndStaticColumns(statics, regulars);
+            return new PartitionColumns(statics, regulars);
         }
 
         private boolean isReversed(List<UnfilteredRowIterator> versions)
@@ -175,23 +159,17 @@ public class DataResolver extends ResponseResolver
         private class MergeListener implements UnfilteredRowIterators.MergeListener
         {
             private final DecoratedKey partitionKey;
-            private final RegularAndStaticColumns columns;
+            private final PartitionColumns columns;
             private final boolean isReversed;
             private final PartitionUpdate[] repairs = new PartitionUpdate[sources.length];
 
             private final Row.Builder[] currentRows = new Row.Builder[sources.length];
             private final RowDiffListener diffListener;
 
-            // The partition level deletion for the merge row.
-            private DeletionTime partitionLevelDeletion;
-            // When merged has a currently open marker, its time. null otherwise.
-            private DeletionTime mergedDeletionTime;
-            // For each source, the time of the current deletion as known by the source.
-            private final DeletionTime[] sourceDeletionTime = new DeletionTime[sources.length];
-            // For each source, record if there is an open range to send as repair, and from where.
-            private final ClusteringBound[] markerToRepair = new ClusteringBound[sources.length];
+            private final Slice.Bound[] markerOpen = new Slice.Bound[sources.length];
+            private final DeletionTime[] markerTime = new DeletionTime[sources.length];
 
-            public MergeListener(DecoratedKey partitionKey, RegularAndStaticColumns columns, boolean isReversed)
+            public MergeListener(DecoratedKey partitionKey, PartitionColumns columns, boolean isReversed)
             {
                 this.partitionKey = partitionKey;
                 this.columns = columns;
@@ -211,7 +189,7 @@ public class DataResolver extends ResponseResolver
                             currentRow(i, clustering).addRowDeletion(merged);
                     }
 
-                    public void onComplexDeletion(int i, Clustering clustering, ColumnMetadata column, DeletionTime merged, DeletionTime original)
+                    public void onComplexDeletion(int i, Clustering clustering, ColumnDefinition column, DeletionTime merged, DeletionTime original)
                     {
                         if (merged != null && !merged.equals(original))
                             currentRow(i, clustering).addComplexDeletion(column, merged);
@@ -219,22 +197,10 @@ public class DataResolver extends ResponseResolver
 
                     public void onCell(int i, Clustering clustering, Cell merged, Cell original)
                     {
-                        if (merged != null && !merged.equals(original) && isQueried(merged))
+                        if (merged != null && !merged.equals(original))
                             currentRow(i, clustering).addCell(merged);
                     }
 
-                    private boolean isQueried(Cell cell)
-                    {
-                        // When we read, we may have some cell that have been fetched but are not selected by the user. Those cells may
-                        // have empty values as optimization (see CASSANDRA-10655) and hence they should not be included in the read-repair.
-                        // This is fine since those columns are not actually requested by the user and are only present for the sake of CQL
-                        // semantic (making sure we can always distinguish between a row that doesn't exist from one that do exist but has
-                        /// no value for the column requested by the user) and so it won't be unexpected by the user that those columns are
-                        // not repaired.
-                        ColumnMetadata column = cell.column();
-                        ColumnFilter filter = command.columnFilter();
-                        return column.isComplex() ? filter.fetchedCellIsQueried(column, cell.path()) : filter.fetchedColumnIsQueried(column);
-                    }
                 };
             }
 
@@ -257,7 +223,6 @@ public class DataResolver extends ResponseResolver
 
             public void onMergedPartitionLevelDeletion(DeletionTime mergedDeletion, DeletionTime[] versions)
             {
-                this.partitionLevelDeletion = mergedDeletion;
                 for (int i = 0; i < versions.length; i++)
                 {
                     if (mergedDeletion.supersedes(versions[i]))
@@ -282,106 +247,24 @@ public class DataResolver extends ResponseResolver
                 Arrays.fill(currentRows, null);
             }
 
-            private DeletionTime currentDeletion()
-            {
-                return mergedDeletionTime == null ? partitionLevelDeletion : mergedDeletionTime;
-            }
-
             public void onMergedRangeTombstoneMarkers(RangeTombstoneMarker merged, RangeTombstoneMarker[] versions)
             {
-                // The current deletion as of dealing with this marker.
-                DeletionTime currentDeletion = currentDeletion();
-
                 for (int i = 0; i < versions.length; i++)
                 {
                     RangeTombstoneMarker marker = versions[i];
-
-                    // Update what the source now thinks is the current deletion
-                    if (marker != null)
-                        sourceDeletionTime[i] = marker.isOpen(isReversed) ? marker.openDeletionTime(isReversed) : null;
-
-                    // If merged == null, some of the source is opening or closing a marker
-                    if (merged == null)
+                    // Note that boundaries are both close and open, so it's not one or the other
+                    if (merged.isClose(isReversed) && markerOpen[i] != null)
                     {
-                        // but if it's not this source, move to the next one
-                        if (marker == null)
-                            continue;
-
-                        // We have a close and/or open marker for a source, with nothing corresponding in merged.
-                        // Because merged is a superset, this imply that we have a current deletion (being it due to an
-                        // early opening in merged or a partition level deletion) and that this deletion will still be
-                        // active after that point. Further whatever deletion was open or is open by this marker on the
-                        // source, that deletion cannot supersedes the current one.
-                        //
-                        // But while the marker deletion (before and/or after this point) cannot supersed the current
-                        // deletion, we want to know if it's equal to it (both before and after), because in that case
-                        // the source is up to date and we don't want to include repair.
-                        //
-                        // So in practice we have 2 possible case:
-                        //  1) the source was up-to-date on deletion up to that point (markerToRepair[i] == null). Then
-                        //     it won't be from that point on unless it's a boundary and the new opened deletion time
-                        //     is also equal to the current deletion (note that this implies the boundary has the same
-                        //     closing and opening deletion time, which should generally not happen, but can due to legacy
-                        //     reading code not avoiding this for a while, see CASSANDRA-13237).
-                        //   2) the source wasn't up-to-date on deletion up to that point (markerToRepair[i] != null), and
-                        //      it may now be (if it isn't we just have nothing to do for that marker).
-                        assert !currentDeletion.isLive() : currentDeletion.toString();
-
-                        if (markerToRepair[i] == null)
-                        {
-                            // Since there is an ongoing merged deletion, the only way we don't have an open repair for
-                            // this source is that it had a range open with the same deletion as current and it's
-                            // closing it.
-                            assert marker.isClose(isReversed) && currentDeletion.equals(marker.closeDeletionTime(isReversed))
-                                 : String.format("currentDeletion=%s, marker=%s", currentDeletion, marker.toString(command.metadata()));
-
-                            // and so unless it's a boundary whose opening deletion time is still equal to the current
-                            // deletion (see comment above for why this can actually happen), we have to repair the source
-                            // from that point on.
-                            if (!(marker.isOpen(isReversed) && currentDeletion.equals(marker.openDeletionTime(isReversed))))
-                                markerToRepair[i] = marker.closeBound(isReversed).invert();
-                        }
-                        // In case 2) above, we only have something to do if the source is up-to-date after that point
-                        else if (marker.isOpen(isReversed) && currentDeletion.equals(marker.openDeletionTime(isReversed)))
-                        {
-                            closeOpenMarker(i, marker.openBound(isReversed).invert());
-                        }
+                        Slice.Bound open = markerOpen[i];
+                        Slice.Bound close = merged.closeBound(isReversed);
+                        update(i).add(new RangeTombstone(Slice.make(isReversed ? close : open, isReversed ? open : close), markerTime[i]));
                     }
-                    else
+                    if (merged.isOpen(isReversed) && (marker == null || merged.openDeletionTime(isReversed).supersedes(marker.openDeletionTime(isReversed))))
                     {
-                        // We have a change of current deletion in merged (potentially to/from no deletion at all).
-
-                        if (merged.isClose(isReversed))
-                        {
-                            // We're closing the merged range. If we're recorded that this should be repaird for the
-                            // source, close and add said range to the repair to send.
-                            if (markerToRepair[i] != null)
-                                closeOpenMarker(i, merged.closeBound(isReversed));
-
-                        }
-
-                        if (merged.isOpen(isReversed))
-                        {
-                            // If we're opening a new merged range (or just switching deletion), then unless the source
-                            // is up to date on that deletion (note that we've updated what the source deleteion is
-                            // above), we'll have to sent the range to the source.
-                            DeletionTime newDeletion = merged.openDeletionTime(isReversed);
-                            DeletionTime sourceDeletion = sourceDeletionTime[i];
-                            if (!newDeletion.equals(sourceDeletion))
-                                markerToRepair[i] = merged.openBound(isReversed);
-                        }
+                        markerOpen[i] = merged.openBound(isReversed);
+                        markerTime[i] = merged.openDeletionTime(isReversed);
                     }
                 }
-
-                if (merged != null)
-                    mergedDeletionTime = merged.isOpen(isReversed) ? merged.openDeletionTime(isReversed) : null;
-            }
-
-            private void closeOpenMarker(int i, ClusteringBound close)
-            {
-                ClusteringBound open = markerToRepair[i];
-                update(i).add(new RangeTombstone(Slice.make(isReversed ? close : open, isReversed ? open : close), currentDeletion()));
-                markerToRepair[i] = null;
             }
 
             public void close()
@@ -406,14 +289,12 @@ public class DataResolver extends ResponseResolver
         private final InetAddress source;
         private final DataLimits.Counter counter;
         private final DataLimits.Counter postReconciliationCounter;
-        private final long queryStartNanoTime;
 
-        private ShortReadProtection(InetAddress source, DataLimits.Counter postReconciliationCounter, long queryStartNanoTime)
+        private ShortReadProtection(InetAddress source, DataLimits.Counter postReconciliationCounter)
         {
             this.source = source;
             this.counter = command.limits().newCounter(command.nowInSec(), false).onlyCount();
             this.postReconciliationCounter = postReconciliationCounter;
-            this.queryStartNanoTime = queryStartNanoTime;
         }
 
         @Override
@@ -429,12 +310,12 @@ public class DataResolver extends ResponseResolver
 
         private class ShortReadRowProtection extends Transformation implements MoreRows<UnfilteredRowIterator>
         {
-            final TableMetadata metadata;
+            final CFMetaData metadata;
             final DecoratedKey partitionKey;
             Clustering lastClustering;
             int lastCount = 0;
 
-            private ShortReadRowProtection(TableMetadata metadata, DecoratedKey partitionKey)
+            private ShortReadRowProtection(CFMetaData metadata, DecoratedKey partitionKey)
             {
                 this.metadata = metadata;
                 this.partitionKey = partitionKey;
@@ -460,9 +341,9 @@ public class DataResolver extends ResponseResolver
                 // Also note that we only get here once all the results for this node have been returned, and so
                 // if the node had returned the requested number but we still get there, it imply some results were
                 // skipped during reconciliation.
-                if (lastCount == counted(counter) || !counter.isDoneForPartition())
+                if (lastCount == counter.counted() || !counter.isDoneForPartition())
                     return null;
-                lastCount = counted(counter);
+                lastCount = counter.counted();
 
                 assert !postReconciliationCounter.isDoneForPartition();
 
@@ -474,8 +355,8 @@ public class DataResolver extends ResponseResolver
                 // we should request m rows so that m * x/n = n-x, that is m = (n^2/x) - n.
                 // Also note that it's ok if we retrieve more results that necessary since our top level iterator is a
                 // counting iterator.
-                int n = countedInCurrentPartition(postReconciliationCounter);
-                int x = countedInCurrentPartition(counter);
+                int n = postReconciliationCounter.countedInCurrentPartition();
+                int x = counter.countedInCurrentPartition();
                 int toQuery = Math.max(((n * n) / x) - n, 1);
 
                 DataLimits retryLimits = command.limits().forShortReadRetry(toQuery);
@@ -492,51 +373,19 @@ public class DataResolver extends ResponseResolver
                 return doShortReadRetry(cmd);
             }
 
-            /**
-             * Returns the number of results counted by the counter.
-             *
-             * @param counter the counter.
-             * @return the number of results counted by the counter
-             */
-            private int counted(Counter counter)
-            {
-                // We are interested by the number of rows but for GROUP BY queries 'counted' returns the number of
-                // groups.
-                if (command.limits().isGroupByLimit())
-                    return counter.rowCounted();
-
-                return counter.counted();
-            }
-
-            /**
-             * Returns the number of results counted in the partition by the counter.
-             *
-             * @param counter the counter.
-             * @return the number of results counted in the partition by the counter
-             */
-            private int countedInCurrentPartition(Counter counter)
-            {
-                // We are interested by the number of rows but for GROUP BY queries 'countedInCurrentPartition' returns
-                // the number of groups in the current partition.
-                if (command.limits().isGroupByLimit())
-                    return counter.rowCountedInCurrentPartition();
-
-                return counter.countedInCurrentPartition();
-            }
-
             private UnfilteredRowIterator doShortReadRetry(SinglePartitionReadCommand retryCommand)
             {
-                DataResolver resolver = new DataResolver(keyspace, retryCommand, ConsistencyLevel.ONE, 1, queryStartNanoTime);
-                ReadCallback handler = new ReadCallback(resolver, ConsistencyLevel.ONE, retryCommand, Collections.singletonList(source), queryStartNanoTime);
+                DataResolver resolver = new DataResolver(keyspace, retryCommand, ConsistencyLevel.ONE, 1);
+                ReadCallback handler = new ReadCallback(resolver, ConsistencyLevel.ONE, retryCommand, Collections.singletonList(source));
                 if (StorageProxy.canDoLocalRequest(source))
                       StageManager.getStage(Stage.READ).maybeExecuteImmediately(new StorageProxy.LocalReadRunnable(retryCommand, handler));
                 else
-                    MessagingService.instance().sendRRWithFailure(retryCommand.createMessage(), source, handler);
+                    MessagingService.instance().sendRRWithFailure(retryCommand.createMessage(MessagingService.current_version), source, handler);
 
                 // We don't call handler.get() because we want to preserve tombstones since we're still in the middle of merging node results.
                 handler.awaitResults();
                 assert resolver.responses.size() == 1;
-                return UnfilteredPartitionIterators.getOnlyElement(resolver.responses.get(0).payload.makeIterator(command), retryCommand);
+                return UnfilteredPartitionIterators.getOnlyElement(resolver.responses.get(0).payload.makeIterator(command.metadata(), command), retryCommand);
             }
         }
     }

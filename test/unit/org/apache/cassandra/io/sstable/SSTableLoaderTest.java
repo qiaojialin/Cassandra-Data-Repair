@@ -31,9 +31,8 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.schema.TableMetadataRef;
-import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.db.marshal.AsciiType;
@@ -107,9 +106,9 @@ public class SSTableLoaderTest
                 addRangeForEndpoint(range, FBUtilities.getBroadcastAddress());
         }
 
-        public TableMetadataRef getTableMetadata(String tableName)
+        public CFMetaData getTableMetadata(String tableName)
         {
-            return Schema.instance.getTableMetadataRef(keyspace, tableName);
+            return Schema.instance.getCFMetaData(keyspace, tableName);
         }
     }
 
@@ -118,7 +117,7 @@ public class SSTableLoaderTest
     {
         File dataDir = new File(tmpdir.getAbsolutePath() + File.separator + KEYSPACE1 + File.separator + CF_STANDARD1);
         assert dataDir.mkdirs();
-        TableMetadata metadata = Schema.instance.getTableMetadata(KEYSPACE1, CF_STANDARD1);
+        CFMetaData cfmeta = Schema.instance.getCFMetaData(KEYSPACE1, CF_STANDARD1);
 
         String schema = "CREATE TABLE %s.%s (key ascii, name ascii, val ascii, val1 ascii, PRIMARY KEY (key, name))";
         String query = "INSERT INTO %s.%s (key, name, val) VALUES (?, ?, ?)";
@@ -143,8 +142,8 @@ public class SSTableLoaderTest
 
         assertEquals(1, partitions.size());
         assertEquals("key1", AsciiType.instance.getString(partitions.get(0).partitionKey().getKey()));
-        assertEquals(ByteBufferUtil.bytes("100"), partitions.get(0).getRow(Clustering.make(ByteBufferUtil.bytes("col1")))
-                                                                   .getCell(metadata.getColumn(ByteBufferUtil.bytes("val")))
+        assertEquals(ByteBufferUtil.bytes("100"), partitions.get(0).getRow(new Clustering(ByteBufferUtil.bytes("col1")))
+                                                                   .getCell(cfmeta.getColumnDefinition(ByteBufferUtil.bytes("val")))
                                                                    .value());
 
         // The stream future is signalled when the work is complete but before releasing references. Wait for release

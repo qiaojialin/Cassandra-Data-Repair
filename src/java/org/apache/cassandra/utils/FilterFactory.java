@@ -20,13 +20,13 @@ package org.apache.cassandra.utils;
 import java.io.DataInput;
 import java.io.IOException;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.utils.obs.IBitSet;
 import org.apache.cassandra.utils.obs.OffHeapBitSet;
 import org.apache.cassandra.utils.obs.OpenBitSet;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class FilterFactory
 {
@@ -40,25 +40,25 @@ public class FilterFactory
         BloomFilterSerializer.serialize((BloomFilter) bf, output);
     }
 
-    public static IFilter deserialize(DataInput input, boolean offheap) throws IOException
+    public static IFilter deserialize(DataInput input, boolean offheap, boolean oldBfHashOrder) throws IOException
     {
-        return BloomFilterSerializer.deserialize(input, offheap);
+        return BloomFilterSerializer.deserialize(input, offheap, oldBfHashOrder);
     }
 
     /**
      * @return A BloomFilter with the lowest practical false positive
      *         probability for the given number of elements.
      */
-    public static IFilter getFilter(long numElements, int targetBucketsPerElem, boolean offheap)
+    public static IFilter getFilter(long numElements, int targetBucketsPerElem, boolean offheap, boolean oldBfHashOrder)
     {
         int maxBucketsPerElement = Math.max(1, BloomCalculations.maxBucketsPerElement(numElements));
         int bucketsPerElement = Math.min(targetBucketsPerElem, maxBucketsPerElement);
         if (bucketsPerElement < targetBucketsPerElem)
         {
-            logger.warn("Cannot provide an optimal BloomFilter for {} elements ({}/{} buckets per element).", numElements, bucketsPerElement, targetBucketsPerElem);
+            logger.warn(String.format("Cannot provide an optimal BloomFilter for %d elements (%d/%d buckets per element).", numElements, bucketsPerElement, targetBucketsPerElem));
         }
         BloomCalculations.BloomSpecification spec = BloomCalculations.computeBloomSpec(bucketsPerElement);
-        return createFilter(spec.K, numElements, spec.bucketsPerElement, offheap);
+        return createFilter(spec.K, numElements, spec.bucketsPerElement, offheap, oldBfHashOrder);
     }
 
     /**
@@ -68,21 +68,21 @@ public class FilterFactory
      *         Asserts that the given probability can be satisfied using this
      *         filter.
      */
-    public static IFilter getFilter(long numElements, double maxFalsePosProbability, boolean offheap)
+    public static IFilter getFilter(long numElements, double maxFalsePosProbability, boolean offheap, boolean oldBfHashOrder)
     {
         assert maxFalsePosProbability <= 1.0 : "Invalid probability";
         if (maxFalsePosProbability == 1.0)
             return new AlwaysPresentFilter();
         int bucketsPerElement = BloomCalculations.maxBucketsPerElement(numElements);
         BloomCalculations.BloomSpecification spec = BloomCalculations.computeBloomSpec(bucketsPerElement, maxFalsePosProbability);
-        return createFilter(spec.K, numElements, spec.bucketsPerElement, offheap);
+        return createFilter(spec.K, numElements, spec.bucketsPerElement, offheap, oldBfHashOrder);
     }
 
     @SuppressWarnings("resource")
-    private static IFilter createFilter(int hash, long numElements, int bucketsPer, boolean offheap)
+    private static IFilter createFilter(int hash, long numElements, int bucketsPer, boolean offheap, boolean oldBfHashOrder)
     {
         long numBits = (numElements * bucketsPer) + BITSET_EXCESS;
         IBitSet bitset = offheap ? new OffHeapBitSet(numBits) : new OpenBitSet(numBits);
-        return new BloomFilter(hash, bitset);
+        return new BloomFilter(hash, bitset, oldBfHashOrder);
     }
 }

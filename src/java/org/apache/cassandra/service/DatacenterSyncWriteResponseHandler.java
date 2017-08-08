@@ -46,11 +46,10 @@ public class DatacenterSyncWriteResponseHandler<T> extends AbstractWriteResponse
                                               ConsistencyLevel consistencyLevel,
                                               Keyspace keyspace,
                                               Runnable callback,
-                                              WriteType writeType,
-                                              long queryStartNanoTime)
+                                              WriteType writeType)
     {
         // Response is been managed by the map so make it 1 for the superclass.
-        super(keyspace, naturalEndpoints, pendingEndpoints, consistencyLevel, callback, writeType, queryStartNanoTime);
+        super(keyspace, naturalEndpoints, pendingEndpoints, consistencyLevel, callback, writeType);
         assert consistencyLevel == ConsistencyLevel.EACH_QUORUM;
 
         NetworkTopologyStrategy strategy = (NetworkTopologyStrategy) keyspace.getReplicationStrategy();
@@ -71,29 +70,21 @@ public class DatacenterSyncWriteResponseHandler<T> extends AbstractWriteResponse
 
     public void response(MessageIn<T> message)
     {
-        try
+        String dataCenter = message == null
+                            ? DatabaseDescriptor.getLocalDataCenter()
+                            : snitch.getDatacenter(message.from);
+
+        responses.get(dataCenter).getAndDecrement();
+        acks.incrementAndGet();
+
+        for (AtomicInteger i : responses.values())
         {
-            String dataCenter = message == null
-                                ? DatabaseDescriptor.getLocalDataCenter()
-                                : snitch.getDatacenter(message.from);
-
-            responses.get(dataCenter).getAndDecrement();
-            acks.incrementAndGet();
-
-            for (AtomicInteger i : responses.values())
-            {
-                if (i.get() > 0)
-                    return;
-            }
-
-            // all the quorum conditions are met
-            signal();
+            if (i.get() > 0)
+                return;
         }
-        finally
-        {
-            //Must be last after all subclass processing
-            logResponseToIdealCLDelegate(message);
-        }
+
+        // all the quorum conditions are met
+        signal();
     }
 
     protected int ackCount()

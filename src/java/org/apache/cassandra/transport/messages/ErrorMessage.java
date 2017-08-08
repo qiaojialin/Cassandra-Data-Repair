@@ -17,10 +17,7 @@
  */
 package org.apache.cassandra.transport.messages;
 
-import java.net.InetAddress;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.handler.codec.CodecException;
@@ -45,7 +42,7 @@ public class ErrorMessage extends Message.Response
 
     public static final Message.Codec<ErrorMessage> codec = new Message.Codec<ErrorMessage>()
     {
-        public ErrorMessage decode(ByteBuf body, ProtocolVersion version)
+        public ErrorMessage decode(ByteBuf body, int version)
         {
             ExceptionCode code = ExceptionCode.fromValue(body.readInt());
             String msg = CBUtil.readString(body);
@@ -79,35 +76,22 @@ public class ErrorMessage extends Message.Response
                 case TRUNCATE_ERROR:
                     te = new TruncateException(msg);
                     break;
-                case WRITE_FAILURE:
+                case WRITE_FAILURE: 
                 case READ_FAILURE:
                     {
                         ConsistencyLevel cl = CBUtil.readConsistencyLevel(body);
                         int received = body.readInt();
                         int blockFor = body.readInt();
-                        // The number of failures is also present in protocol v5, but used instead to specify the size of the failure map
                         int failure = body.readInt();
-
-                        Map<InetAddress, RequestFailureReason> failureReasonByEndpoint = new ConcurrentHashMap<>();
-                        if (version.isGreaterOrEqualTo(ProtocolVersion.V5))
-                        {
-                            for (int i = 0; i < failure; i++)
-                            {
-                                InetAddress endpoint = CBUtil.readInetAddr(body);
-                                RequestFailureReason failureReason = RequestFailureReason.fromCode(body.readUnsignedShort());
-                                failureReasonByEndpoint.put(endpoint, failureReason);
-                            }
-                        }
-
                         if (code == ExceptionCode.WRITE_FAILURE)
                         {
                             WriteType writeType = Enum.valueOf(WriteType.class, CBUtil.readString(body));
-                            te = new WriteFailureException(cl, received, blockFor, writeType, failureReasonByEndpoint);
+                            te = new WriteFailureException(cl, received, failure, blockFor, writeType);
                         }
                         else
                         {
                             byte dataPresent = body.readByte();
-                            te = new ReadFailureException(cl, received, blockFor, dataPresent != 0, failureReasonByEndpoint);
+                            te = new ReadFailureException(cl, received, failure, blockFor, dataPresent != 0);   
                         }
                     }
                     break;
@@ -163,12 +147,11 @@ public class ErrorMessage extends Message.Response
             return new ErrorMessage(te);
         }
 
-        public void encode(ErrorMessage msg, ByteBuf dest, ProtocolVersion version)
+        public void encode(ErrorMessage msg, ByteBuf dest, int version)
         {
             final TransportException err = getBackwardsCompatibleException(msg, version);
             dest.writeInt(err.code().value);
-            String errorString = err.getMessage() == null ? "" : err.getMessage();
-            CBUtil.writeString(errorString, dest);
+            CBUtil.writeString(err.getMessage(), dest);
 
             switch (err.code())
             {
@@ -187,17 +170,7 @@ public class ErrorMessage extends Message.Response
                         CBUtil.writeConsistencyLevel(rfe.consistency, dest);
                         dest.writeInt(rfe.received);
                         dest.writeInt(rfe.blockFor);
-                        // The number of failures is also present in protocol v5, but used instead to specify the size of the failure map
-                        dest.writeInt(rfe.failureReasonByEndpoint.size());
-
-                        if (version.isGreaterOrEqualTo(ProtocolVersion.V5))
-                        {
-                            for (Map.Entry<InetAddress, RequestFailureReason> entry : rfe.failureReasonByEndpoint.entrySet())
-                            {
-                                CBUtil.writeInetAddr(entry.getKey(), dest);
-                                dest.writeShort(entry.getValue().code);
-                            }
-                        }
+                        dest.writeInt(rfe.failures);
 
                         if (isWrite)
                             CBUtil.writeString(((WriteFailureException)rfe).writeType.toString(), dest);
@@ -236,11 +209,10 @@ public class ErrorMessage extends Message.Response
             }
         }
 
-        public int encodedSize(ErrorMessage msg, ProtocolVersion version)
+        public int encodedSize(ErrorMessage msg, int version)
         {
             final TransportException err = getBackwardsCompatibleException(msg, version);
-            String errorString = err.getMessage() == null ? "" : err.getMessage();
-            int size = 4 + CBUtil.sizeOfString(errorString);
+            int size = 4 + CBUtil.sizeOfString(err.getMessage());
             switch (err.code())
             {
                 case UNAVAILABLE:
@@ -254,15 +226,6 @@ public class ErrorMessage extends Message.Response
                         boolean isWrite = err.code() == ExceptionCode.WRITE_FAILURE;
                         size += CBUtil.sizeOfConsistencyLevel(rfe.consistency) + 4 + 4 + 4;
                         size += isWrite ? CBUtil.sizeOfString(((WriteFailureException)rfe).writeType.toString()) : 1;
-
-                        if (version.isGreaterOrEqualTo(ProtocolVersion.V5))
-                        {
-                            for (Map.Entry<InetAddress, RequestFailureReason> entry : rfe.failureReasonByEndpoint.entrySet())
-                            {
-                                size += CBUtil.sizeOfInetAddr(entry.getKey());
-                                size += 2; // RequestFailureReason code
-                            }
-                        }
                     }
                     break;
                 case WRITE_TIMEOUT:
@@ -292,9 +255,9 @@ public class ErrorMessage extends Message.Response
         }
     };
 
-    private static TransportException getBackwardsCompatibleException(ErrorMessage msg, ProtocolVersion version)
+    private static TransportException getBackwardsCompatibleException(ErrorMessage msg, int version)
     {
-        if (version.isSmallerThan(ProtocolVersion.V4))
+        if (version < Server.VERSION_4)
         {
             switch (msg.error.code())
             {
@@ -366,18 +329,7 @@ public class ErrorMessage extends Message.Response
         }
 
         if (e instanceof TransportException)
-        {
-            ErrorMessage message = new ErrorMessage((TransportException) e, streamId);
-            if (e instanceof ProtocolException)
-            {
-                // if the driver attempted to connect with a protocol version not supported then
-                // reply with the appropiate version, see ProtocolVersion.decode()
-                ProtocolVersion forcedProtocolVersion = ((ProtocolException) e).getForcedProtocolVersion();
-                if (forcedProtocolVersion != null)
-                    message.forcedProtocolVersion = forcedProtocolVersion;
-            }
-            return message;
-        }
+            return new ErrorMessage((TransportException)e, streamId);
 
         // Unexpected exception
         if (unexpectedExceptionHandler == null || !unexpectedExceptionHandler.apply(e))

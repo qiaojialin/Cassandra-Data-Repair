@@ -37,6 +37,7 @@ public class BatchTests
     private static Cluster cluster;
     private static Session session;
 
+
     private static PreparedStatement counter;
     private static PreparedStatement noncounter;
 
@@ -113,12 +114,6 @@ public class BatchTests
         sendBatch(BatchStatement.Type.UNLOGGED, true, false);
     }
 
-    @Test
-    public void testEmptyBatch()
-    {
-        session.execute("BEGIN BATCH APPLY BATCH");
-        session.execute("BEGIN UNLOGGED BATCH APPLY BATCH");
-    }
 
     @Test(expected = InvalidQueryException.class)
     public void testCounterInLoggedBatch()
@@ -137,6 +132,8 @@ public class BatchTests
         }
         session.execute(b);
     }
+
+
 
     public void sendBatch(BatchStatement.Type type, boolean addCounter, boolean addNonCounter)
     {

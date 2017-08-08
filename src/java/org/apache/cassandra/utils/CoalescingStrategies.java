@@ -17,13 +17,9 @@
  */
 package org.apache.cassandra.utils;
 
-import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.Config;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.util.FileUtils;
-
 import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.RandomAccessFile;
@@ -36,14 +32,12 @@ import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
-import java.util.Locale;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 
 public class CoalescingStrategies
 {
-    static protected final Logger logger = LoggerFactory.getLogger(CoalescingStrategies.class);
 
     /*
      * Log debug information at info level about what the average is and when coalescing is enabled/disabled
@@ -54,8 +48,7 @@ public class CoalescingStrategies
     private static final String DEBUG_COALESCING_PATH_PROPERTY = Config.PROPERTY_PREFIX + "coalescing_debug_path";
     private static final String DEBUG_COALESCING_PATH = System.getProperty(DEBUG_COALESCING_PATH_PROPERTY, "/tmp/coleascing_debug");
 
-    static
-    {
+    static {
         if (DEBUG_COALESCING)
         {
             File directory = new File(DEBUG_COALESCING_PATH);
@@ -83,8 +76,7 @@ public class CoalescingStrategies
         }
     };
 
-    public static interface Coalescable
-    {
+    public static interface Coalescable {
         long timestampNanos();
     }
 
@@ -93,26 +85,18 @@ public class CoalescingStrategies
     {
         long now = System.nanoTime();
         final long timer = now + nanos;
-        // We shouldn't loop if it's within a few % of the target sleep time if on a second iteration.
-        // See CASSANDRA-8692.
-        final long limit = timer - nanos / 16;
         do
         {
             LockSupport.parkNanos(timer - now);
-            now = System.nanoTime();
         }
-        while (now < limit);
+        while (timer - (now = System.nanoTime()) > nanos / 16);
     }
 
     private static boolean maybeSleep(int messages, long averageGap, long maxCoalesceWindow, Parker parker)
     {
-        // Do not sleep if there are still items in the backlog (CASSANDRA-13090).
-        if (messages >= DatabaseDescriptor.getOtcCoalescingEnoughCoalescedMessages())
-            return false;
-
         // only sleep if we can expect to double the number of messages we're sending in the time interval
         long sleep = messages * averageGap;
-        if (sleep <= 0 || sleep > maxCoalesceWindow)
+        if (sleep > maxCoalesceWindow)
             return false;
 
         // assume we receive as many messages as we expect; apply the same logic to the future batch:
@@ -140,21 +124,22 @@ public class CoalescingStrategies
             this.displayName = displayName;
             if (DEBUG_COALESCING)
             {
-                NamedThreadFactory.createThread(() ->
-                {
-                    while (true)
-                    {
-                        try
-                        {
-                            Thread.sleep(5000);
+                new Thread(displayName + " debug thread") {
+                    @Override
+                    public void run() {
+                        while (true) {
+                            try
+                            {
+                                Thread.sleep(5000);
+                            }
+                            catch (InterruptedException e)
+                            {
+                                throw new AssertionError();
+                            }
+                            shouldLogAverage = true;
                         }
-                        catch (InterruptedException e)
-                        {
-                            throw new AssertionError();
-                        }
-                        shouldLogAverage = true;
                     }
-                }, displayName + " debug thread").start();
+                }.start();
             }
             RandomAccessFile rasTemp = null;
             ByteBuffer logBufferTemp = null;
@@ -204,12 +189,9 @@ public class CoalescingStrategies
          * If debugging is enabled log the timestamps of all the items in the provided collection
          * to a file.
          */
-        final protected <C extends Coalescable> void debugTimestamps(Collection<C> coalescables)
-        {
-            if (DEBUG_COALESCING)
-            {
-                for (C coalescable : coalescables)
-                {
+        final protected <C extends Coalescable> void debugTimestamps(Collection<C> coalescables) {
+            if (DEBUG_COALESCING) {
+                for (C coalescable : coalescables) {
                     debugTimestamp(coalescable.timestampNanos());
                 }
             }
@@ -347,7 +329,7 @@ public class CoalescingStrategies
             if (input.drainTo(out, maxItems) == 0)
             {
                 out.add(input.take());
-                input.drainTo(out, maxItems - out.size());
+                input.drainTo(out, maxItems - 1);
             }
 
             for (Coalescable qm : out)
@@ -368,8 +350,7 @@ public class CoalescingStrategies
         }
 
         @Override
-        public String toString()
-        {
+        public String toString() {
             return "Time horizon moving average";
         }
     }
@@ -430,23 +411,21 @@ public class CoalescingStrategies
             if (input.drainTo(out, maxItems) == 0)
             {
                 out.add(input.take());
-                input.drainTo(out, maxItems - out.size());
             }
 
             long average = notifyOfSample(out.get(0).timestampNanos());
+
             debugGap(average);
 
-            if (maybeSleep(out.size(), average, maxCoalesceWindow, parker)) {
-                input.drainTo(out, maxItems - out.size());
-            }
+            maybeSleep(out.size(), average, maxCoalesceWindow, parker);
 
+            input.drainTo(out, maxItems - out.size());
             for (int ii = 1; ii < out.size(); ii++)
                 notifyOfSample(out.get(ii).timestampNanos());
         }
 
         @Override
-        public String toString()
-        {
+        public String toString() {
             return "Moving average";
         }
     }
@@ -468,23 +447,17 @@ public class CoalescingStrategies
         @Override
         protected <C extends Coalescable> void coalesceInternal(BlockingQueue<C> input, List<C> out,  int maxItems) throws InterruptedException
         {
-            int enough = DatabaseDescriptor.getOtcCoalescingEnoughCoalescedMessages();
-
             if (input.drainTo(out, maxItems) == 0)
             {
                 out.add(input.take());
-                input.drainTo(out, maxItems - out.size());
-                if (out.size() < enough) {
-                    parker.park(coalesceWindow);
-                    input.drainTo(out, maxItems - out.size());
-                }
+                parker.park(coalesceWindow);
+                input.drainTo(out, maxItems - 1);
             }
             debugTimestamps(out);
         }
 
         @Override
-        public String toString()
-        {
+        public String toString() {
             return "Fixed";
         }
     }
@@ -513,8 +486,7 @@ public class CoalescingStrategies
         }
 
         @Override
-        public String toString()
-        {
+        public String toString() {
             return "Disabled";
         }
     }
@@ -527,7 +499,7 @@ public class CoalescingStrategies
                                                     String displayName)
     {
         String classname = null;
-        String strategyCleaned = strategy.trim().toUpperCase(Locale.ENGLISH);
+        String strategyCleaned = strategy.trim().toUpperCase();
         switch(strategyCleaned)
         {
         case "MOVINGAVERAGE":

@@ -1,23 +1,3 @@
-/*
- *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
- */
 package org.apache.cassandra.db.rows;
 
 import java.nio.ByteBuffer;
@@ -28,19 +8,22 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.db.Slice.Bound;
 import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.schema.KeyspaceParams;
@@ -55,22 +38,22 @@ public class RowAndDeletionMergeIteratorTest
     private int nowInSeconds;
     private DecoratedKey dk;
     private ColumnFamilyStore cfs;
-    private TableMetadata cfm;
-    private ColumnMetadata defA;
+    private CFMetaData cfm;
+    private ColumnDefinition defA;
 
     @BeforeClass
     public static void defineSchema() throws ConfigurationException
     {
-        DatabaseDescriptor.daemonInitialization();
-
-        TableMetadata.Builder builder =
-            TableMetadata.builder(KEYSPACE1, CF_STANDARD1)
-                         .addPartitionKeyColumn("key", AsciiType.instance)
-                         .addClusteringColumn("col1", Int32Type.instance)
-                         .addRegularColumn("a", Int32Type.instance);
-
+        CFMetaData cfMetadata = CFMetaData.Builder.create(KEYSPACE1, CF_STANDARD1)
+                                                  .addPartitionKey("key", AsciiType.instance)
+                                                  .addClusteringColumn("col1", Int32Type.instance)
+                                                  .addRegularColumn("a", Int32Type.instance)
+                                                  .build();
         SchemaLoader.prepareServer();
-        SchemaLoader.createKeyspace(KEYSPACE1, KeyspaceParams.simple(1), builder);
+        SchemaLoader.createKeyspace(KEYSPACE1,
+                                    KeyspaceParams.simple(1),
+                                    cfMetadata);
+
     }
 
     @Before
@@ -79,8 +62,8 @@ public class RowAndDeletionMergeIteratorTest
         nowInSeconds = FBUtilities.nowInSeconds();
         dk = Util.dk("key0");
         cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1);
-        cfm = cfs.metadata();
-        defA = cfm.getColumn(new ColumnIdentifier("a", true));
+        cfm = cfs.metadata;
+        defA = cfm.getColumnDefinition(new ColumnIdentifier("a", true));
     }
 
     @Test
@@ -127,7 +110,7 @@ public class RowAndDeletionMergeIteratorTest
         assertRtMarker(iterator.next(), ClusteringPrefix.Kind.INCL_START_BOUND, 4);
 
         assertTrue(iterator.hasNext());
-        assertRtMarker(iterator.next(), ClusteringBound.TOP);
+        assertRtMarker(iterator.next(), Bound.TOP);
 
         assertFalse(iterator.hasNext());
     }
@@ -145,7 +128,7 @@ public class RowAndDeletionMergeIteratorTest
         UnfilteredRowIterator iterator = createMergeIterator(rowIterator, rangeTombstoneIterator, false);
 
         assertTrue(iterator.hasNext());
-        assertRtMarker(iterator.next(), ClusteringBound.BOTTOM);
+        assertRtMarker(iterator.next(), Bound.BOTTOM);
 
         assertTrue(iterator.hasNext());
         assertRtMarker(iterator.next(), ClusteringPrefix.Kind.INCL_END_BOUND, 0);
@@ -190,7 +173,7 @@ public class RowAndDeletionMergeIteratorTest
         assertRtMarker(iterator.next(), ClusteringPrefix.Kind.EXCL_START_BOUND, 2);
 
         assertTrue(iterator.hasNext());
-        assertRtMarker(iterator.next(), ClusteringBound.TOP);
+        assertRtMarker(iterator.next(), Bound.TOP);
 
         assertFalse(iterator.hasNext());
     }
@@ -209,7 +192,7 @@ public class RowAndDeletionMergeIteratorTest
         UnfilteredRowIterator iterator = createMergeIterator(rowIterator, rangeTombstoneIterator, false);
 
         assertTrue(iterator.hasNext());
-        assertRtMarker(iterator.next(), ClusteringBound.BOTTOM);
+        assertRtMarker(iterator.next(), Bound.BOTTOM);
 
         assertTrue(iterator.hasNext());
         assertRtMarker(iterator.next(), ClusteringPrefix.Kind.INCL_END_BOUND, 0);
@@ -224,7 +207,7 @@ public class RowAndDeletionMergeIteratorTest
         assertRtMarker(iterator.next(), ClusteringPrefix.Kind.EXCL_START_BOUND, 2);
 
         assertTrue(iterator.hasNext());
-        assertRtMarker(iterator.next(), ClusteringBound.TOP);
+        assertRtMarker(iterator.next(), Bound.TOP);
 
         assertFalse(iterator.hasNext());
     }
@@ -250,13 +233,13 @@ public class RowAndDeletionMergeIteratorTest
         UnfilteredRowIterator iterator = createMergeIterator(rowIterator, rangeTombstoneIterator, false);
 
         assertTrue(iterator.hasNext());
-        assertRtMarker(iterator.next(), ClusteringBound.BOTTOM);
+        assertRtMarker(iterator.next(), Bound.BOTTOM);
 
         assertTrue(iterator.hasNext());
         assertRtMarker(iterator.next(), ClusteringPrefix.Kind.INCL_END_EXCL_START_BOUNDARY, 2);
 
         assertTrue(iterator.hasNext());
-        assertRtMarker(iterator.next(), ClusteringBound.TOP);
+        assertRtMarker(iterator.next(), Bound.TOP);
 
         assertFalse(iterator.hasNext());
     }
@@ -275,13 +258,13 @@ public class RowAndDeletionMergeIteratorTest
         UnfilteredRowIterator iterator = createMergeIterator(rowIterator, rangeTombstoneIterator, false);
 
         assertTrue(iterator.hasNext());
-        assertRtMarker(iterator.next(), ClusteringBound.BOTTOM);
+        assertRtMarker(iterator.next(), Bound.BOTTOM);
 
         assertTrue(iterator.hasNext());
         assertRtMarker(iterator.next(), ClusteringPrefix.Kind.EXCL_END_INCL_START_BOUNDARY, 2);
 
         assertTrue(iterator.hasNext());
-        assertRtMarker(iterator.next(), ClusteringBound.TOP);
+        assertRtMarker(iterator.next(), Bound.TOP);
 
         assertFalse(iterator.hasNext());
     }
@@ -296,7 +279,7 @@ public class RowAndDeletionMergeIteratorTest
         UnfilteredRowIterator iterator = createMergeIterator(rowIterator, rangeTombstoneIterator, false);
 
         assertTrue(iterator.hasNext());
-        assertRtMarker(iterator.next(), ClusteringBound.BOTTOM);
+        assertRtMarker(iterator.next(), Bound.BOTTOM);
 
         assertTrue(iterator.hasNext());
         assertRow(iterator.next(), 0);
@@ -342,7 +325,7 @@ public class RowAndDeletionMergeIteratorTest
     }
 
 
-    private void assertRtMarker(Unfiltered unfiltered, ClusteringBoundOrBoundary bound)
+    private void assertRtMarker(Unfiltered unfiltered, Bound bound)
     {
         assertEquals(Unfiltered.Kind.RANGE_TOMBSTONE_MARKER, unfiltered.kind());
         assertEquals(bound, unfiltered.clustering());
@@ -366,7 +349,7 @@ public class RowAndDeletionMergeIteratorTest
 
     private Iterator<Row> createRowIterator()
     {
-        PartitionUpdate update = new PartitionUpdate(cfm, dk, cfm.regularAndStaticColumns(), 1);
+        PartitionUpdate update = new PartitionUpdate(cfm, dk, cfm.partitionColumns(), 1);
         for (int i = 0; i < 5; i++)
             addRow(update, i, i);
 
@@ -397,38 +380,38 @@ public class RowAndDeletionMergeIteratorTest
 
     private void addRow(PartitionUpdate update, int col1, int a)
     {
-        update.add(BTreeRow.singleCellRow(update.metadata().comparator.make(col1), makeCell(defA, a, 0)));
+        update.add(BTreeRow.singleCellRow(update.metadata().comparator.make(col1), makeCell(cfm, defA, a, 0)));
     }
 
-    private Cell makeCell(ColumnMetadata columnMetadata, int value, long timestamp)
+    private Cell makeCell(CFMetaData cfm, ColumnDefinition columnDefinition, int value, long timestamp)
     {
-        return BufferCell.live(columnMetadata, timestamp, ((AbstractType) columnMetadata.cellValueType()).decompose(value));
+        return BufferCell.live(cfm, columnDefinition, timestamp, ((AbstractType)columnDefinition.cellValueType()).decompose(value));
     }
 
     private static RangeTombstone atLeast(int start, long tstamp, int delTime)
     {
-        return new RangeTombstone(Slice.make(ClusteringBound.inclusiveStartOf(bb(start)), ClusteringBound.TOP), new DeletionTime(tstamp, delTime));
+        return new RangeTombstone(Slice.make(Slice.Bound.inclusiveStartOf(bb(start)), Slice.Bound.TOP), new DeletionTime(tstamp, delTime));
     }
 
     private static RangeTombstone atMost(int end, long tstamp, int delTime)
     {
-        return new RangeTombstone(Slice.make(ClusteringBound.BOTTOM, ClusteringBound.inclusiveEndOf(bb(end))), new DeletionTime(tstamp, delTime));
+        return new RangeTombstone(Slice.make(Slice.Bound.BOTTOM, Slice.Bound.inclusiveEndOf(bb(end))), new DeletionTime(tstamp, delTime));
     }
 
     private static RangeTombstone lessThan(int end, long tstamp, int delTime)
     {
-        return new RangeTombstone(Slice.make(ClusteringBound.BOTTOM, ClusteringBound.exclusiveEndOf(bb(end))), new DeletionTime(tstamp, delTime));
+        return new RangeTombstone(Slice.make(Slice.Bound.BOTTOM, Slice.Bound.exclusiveEndOf(bb(end))), new DeletionTime(tstamp, delTime));
     }
 
     private static RangeTombstone greaterThan(int start, long tstamp, int delTime)
     {
-        return new RangeTombstone(Slice.make(ClusteringBound.exclusiveStartOf(bb(start)), ClusteringBound.TOP), new DeletionTime(tstamp, delTime));
+        return new RangeTombstone(Slice.make(Slice.Bound.exclusiveStartOf(bb(start)), Slice.Bound.TOP), new DeletionTime(tstamp, delTime));
     }
 
     private static RangeTombstone rt(int start, boolean startInclusive, int end, boolean endInclusive, long tstamp, int delTime)
     {
-        ClusteringBound startBound = startInclusive ? ClusteringBound.inclusiveStartOf(bb(start)) : ClusteringBound.exclusiveStartOf(bb(start));
-        ClusteringBound endBound = endInclusive ? ClusteringBound.inclusiveEndOf(bb(end)) : ClusteringBound.exclusiveEndOf(bb(end));
+        Slice.Bound startBound = startInclusive ? Slice.Bound.inclusiveStartOf(bb(start)) : Slice.Bound.exclusiveStartOf(bb(start));
+        Slice.Bound endBound = endInclusive ? Slice.Bound.inclusiveEndOf(bb(end)) : Slice.Bound.exclusiveEndOf(bb(end));
 
         return new RangeTombstone(Slice.make(startBound, endBound), new DeletionTime(tstamp, delTime));
     }

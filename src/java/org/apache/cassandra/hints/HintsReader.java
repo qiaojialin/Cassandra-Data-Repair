@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.hints;
 
-import java.io.EOFException;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -31,10 +30,12 @@ import com.google.common.util.concurrent.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.exceptions.UnknownTableException;
+import org.apache.cassandra.db.UnknownColumnFamilyException;
 import org.apache.cassandra.io.FSReadError;
-import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.AbstractIterator;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.CLibrary;
 
 /**
  * A paged non-compressed hints reader that provides two iterators:
@@ -47,7 +48,7 @@ import org.apache.cassandra.utils.AbstractIterator;
  * The latter is required for dispatch of hints to nodes that have a different messaging version, and in general is just an
  * easy way to enable backward and future compatibilty.
  */
-class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
+final class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
 {
     private static final Logger logger = LoggerFactory.getLogger(HintsReader.class);
 
@@ -62,7 +63,7 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
     @Nullable
     private final RateLimiter rateLimiter;
 
-    protected HintsReader(HintsDescriptor descriptor, File file, ChecksummedDataInput reader, RateLimiter rateLimiter)
+    private HintsReader(HintsDescriptor descriptor, File file, ChecksummedDataInput reader, RateLimiter rateLimiter)
     {
         this.descriptor = descriptor;
         this.file = file;
@@ -77,14 +78,6 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
         try
         {
             HintsDescriptor descriptor = HintsDescriptor.deserialize(reader);
-            if (descriptor.isCompressed())
-            {
-                // since the hints descriptor is always uncompressed, it needs to be read with the normal ChecksummedDataInput.
-                // The compressed input is instantiated with the uncompressed input's position
-                reader = CompressedChecksummedDataInput.upgradeInput(reader, descriptor.createCompressor());
-            }
-            else if (descriptor.isEncrypted())
-                reader = EncryptedChecksummedDataInput.upgradeInput(reader, descriptor.getCipher(), descriptor.createCompressor());
             return new HintsReader(descriptor, file, reader, rateLimiter);
         }
         catch (IOException e)
@@ -109,7 +102,7 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
         return descriptor;
     }
 
-    void seek(InputPosition newPosition)
+    void seek(long newPosition)
     {
         input.seek(newPosition);
     }
@@ -119,28 +112,23 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
         return new PagesIterator();
     }
 
-    public ChecksummedDataInput getInput()
-    {
-        return input;
-    }
-
     final class Page
     {
-        public final InputPosition position;
+        public final long offset;
 
-        private Page(InputPosition inputPosition)
+        private Page(long offset)
         {
-            this.position = inputPosition;
+            this.offset = offset;
         }
 
         Iterator<Hint> hintsIterator()
         {
-            return new HintsIterator(position);
+            return new HintsIterator(offset);
         }
 
         Iterator<ByteBuffer> buffersIterator()
         {
-            return new BuffersIterator(position);
+            return new BuffersIterator(offset);
         }
     }
 
@@ -149,12 +137,12 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
         @SuppressWarnings("resource")
         protected Page computeNext()
         {
-            input.tryUncacheRead();
+            CLibrary.trySkipCache(input.getChannel().getFileDescriptor(), 0, input.getFilePointer(), input.getPath());
 
-            if (input.isEOF())
+            if (input.length() == input.getFilePointer())
                 return endOfData();
 
-            return new Page(input.getSeekPosition());
+            return new Page(input.getFilePointer());
         }
     }
 
@@ -163,10 +151,9 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
      */
     final class HintsIterator extends AbstractIterator<Hint>
     {
-        private final InputPosition offset;
-        private final long now = System.currentTimeMillis();
+        private final long offset;
 
-        HintsIterator(InputPosition offset)
+        HintsIterator(long offset)
         {
             super();
             this.offset = offset;
@@ -178,22 +165,17 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
 
             do
             {
-                InputPosition position = input.getSeekPosition();
+                long position = input.getFilePointer();
 
-                if (input.isEOF())
+                if (input.length() == position)
                     return endOfData(); // reached EOF
 
-                if (position.subtract(offset) >= PAGE_SIZE)
+                if (position - offset >= PAGE_SIZE)
                     return endOfData(); // read page size or more bytes
 
                 try
                 {
                     hint = computeNextInternal();
-                }
-                catch (EOFException e)
-                {
-                    logger.warn("Unexpected EOF replaying hints ({}), likely due to unflushed hint file on shutdown; continuing", descriptor.fileName(), e);
-                    return endOfData();
                 }
                 catch (IOException e)
                 {
@@ -228,15 +210,14 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
             Hint hint;
             try
             {
-                hint = Hint.serializer.deserializeIfLive(input, now, size, descriptor.messagingVersion());
+                hint = Hint.serializer.deserialize(input, descriptor.messagingVersion());
                 input.checkLimit(0);
             }
-            catch (UnknownTableException e)
+            catch (UnknownColumnFamilyException e)
             {
-                logger.warn("Failed to read a hint for {}: {} - table with id {} is unknown in file {}",
-                            StorageService.instance.getEndpointForHostId(descriptor.hostId),
+                logger.warn("Failed to read a hint for {} - table with id {} is unknown in file {}",
                             descriptor.hostId,
-                            e.id,
+                            e.cfId,
                             descriptor.fileName());
                 input.skipBytes(Ints.checkedCast(size - input.bytesPastLimit()));
 
@@ -247,8 +228,7 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
                 return hint;
 
             // log a warning and skip the corrupted entry
-            logger.warn("Failed to read a hint for {}: {} - digest mismatch for hint at position {} in file {}",
-                        StorageService.instance.getEndpointForHostId(descriptor.hostId),
+            logger.warn("Failed to read a hint for {} - digest mismatch for hint at position {} in file {}",
                         descriptor.hostId,
                         input.getPosition() - size - 4,
                         descriptor.fileName());
@@ -261,10 +241,9 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
      */
     final class BuffersIterator extends AbstractIterator<ByteBuffer>
     {
-        private final InputPosition offset;
-        private final long now = System.currentTimeMillis();
+        private final long offset;
 
-        BuffersIterator(InputPosition offset)
+        BuffersIterator(long offset)
         {
             super();
             this.offset = offset;
@@ -276,22 +255,17 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
 
             do
             {
-                InputPosition position = input.getSeekPosition();
+                long position = input.getFilePointer();
 
-                if (input.isEOF())
+                if (input.length() == position)
                     return endOfData(); // reached EOF
 
-                if (position.subtract(offset) >= PAGE_SIZE)
+                if (position - offset >= PAGE_SIZE)
                     return endOfData(); // read page size or more bytes
 
                 try
                 {
                     buffer = computeNextInternal();
-                }
-                catch (EOFException e)
-                {
-                    logger.warn("Unexpected EOF replaying hints ({}), likely due to unflushed hint file on shutdown; continuing", descriptor.fileName(), e);
-                    return endOfData();
                 }
                 catch (IOException e)
                 {
@@ -323,7 +297,7 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
                 rateLimiter.acquire(size);
             input.limit(size);
 
-            ByteBuffer buffer = Hint.serializer.readBufferIfLive(input, now, size, descriptor.messagingVersion());
+            ByteBuffer buffer = ByteBufferUtil.read(input, size);
             if (input.checkCrc())
                 return buffer;
 

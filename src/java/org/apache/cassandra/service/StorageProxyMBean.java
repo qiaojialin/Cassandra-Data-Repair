@@ -21,8 +21,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.cassandra.db.ConsistencyLevel;
-
 public interface StorageProxyMBean
 {
     public long getTotalHints();
@@ -61,14 +59,6 @@ public interface StorageProxyMBean
     public long getReadRepairRepairedBlocking();
     public long getReadRepairRepairedBackground();
 
-    public int getOtcBacklogExpirationInterval();
-    public void setOtcBacklogExpirationInterval(int intervalInMillis);
-
     /** Returns each live node's schema version */
     public Map<String, List<String>> getSchemaVersions();
-
-    public int getNumberOfTables();
-
-    public String getIdealConsistencyLevel();
-    public String setIdealConsistencyLevel(String cl);
 }

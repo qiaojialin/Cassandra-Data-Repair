@@ -23,6 +23,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.*;
@@ -34,8 +35,6 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.gms.*;
-import org.apache.cassandra.streaming.PreviewKind;
-import org.apache.cassandra.streaming.SessionSummary;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MerkleTrees;
@@ -88,12 +87,13 @@ public class RepairSession extends AbstractFuture<RepairSessionResult> implement
     public final String keyspace;
     private final String[] cfnames;
     public final RepairParallelism parallelismDegree;
-    public final boolean pullRepair;
     /** Range to repair */
     public final Collection<Range<Token>> ranges;
     public final Set<InetAddress> endpoints;
-    public final boolean isConsistent;
-    public final PreviewKind previewKind;
+    public final long repairedAt;
+
+    // number of validations left to be performed
+    private final AtomicInteger validationRemaining;
 
     private final AtomicBoolean isFailed = new AtomicBoolean(false);
 
@@ -117,7 +117,6 @@ public class RepairSession extends AbstractFuture<RepairSessionResult> implement
      * @param parallelismDegree specifies the degree of parallelism when calculating the merkle trees
      * @param endpoints the data centers that should be part of the repair; null for all DCs
      * @param repairedAt when the repair occurred (millis)
-     * @param pullRepair true if the repair should be one way (from remote host to this host and only applicable between two hosts--see RepairOption)
      * @param cfnames names of columnfamilies
      */
     public RepairSession(UUID parentRepairSession,
@@ -126,9 +125,7 @@ public class RepairSession extends AbstractFuture<RepairSessionResult> implement
                          String keyspace,
                          RepairParallelism parallelismDegree,
                          Set<InetAddress> endpoints,
-                         boolean isConsistent,
-                         boolean pullRepair,
-                         PreviewKind previewKind,
+                         long repairedAt,
                          String... cfnames)
     {
         assert cfnames.length > 0 : "Repairing no column families seems pointless, doesn't it";
@@ -140,9 +137,8 @@ public class RepairSession extends AbstractFuture<RepairSessionResult> implement
         this.cfnames = cfnames;
         this.ranges = ranges;
         this.endpoints = endpoints;
-        this.isConsistent = isConsistent;
-        this.previewKind = previewKind;
-        this.pullRepair = pullRepair;
+        this.repairedAt = repairedAt;
+        this.validationRemaining = new AtomicInteger(cfnames.length);
     }
 
     public UUID getId()
@@ -182,9 +178,17 @@ public class RepairSession extends AbstractFuture<RepairSessionResult> implement
         }
 
         String message = String.format("Received merkle tree for %s from %s", desc.columnFamily, endpoint);
-        logger.info("{} {}", previewKind.logPrefix(getId()), message);
+        logger.info("[repair #{}] {}", getId(), message);
         Tracing.traceRepair(message);
         task.treesReceived(trees);
+
+        // Unregister from FailureDetector once we've completed synchronizing Merkle trees.
+        // After this point, we rely on tcp_keepalive for individual sockets to notify us when a connection is down.
+        // See CASSANDRA-3569
+        if (validationRemaining.decrementAndGet() == 0)
+        {
+            FailureDetector.instance.unregisterFailureDetectionEventListener(this);
+        }
     }
 
     /**
@@ -194,7 +198,7 @@ public class RepairSession extends AbstractFuture<RepairSessionResult> implement
      * @param nodes nodes that completed sync
      * @param success true if sync succeeded
      */
-    public void syncComplete(RepairJobDesc desc, NodePair nodes, boolean success, List<SessionSummary> summaries)
+    public void syncComplete(RepairJobDesc desc, NodePair nodes, boolean success)
     {
         RemoteSyncTask task = syncingTasks.get(Pair.create(desc, nodes));
         if (task == null)
@@ -203,8 +207,8 @@ public class RepairSession extends AbstractFuture<RepairSessionResult> implement
             return;
         }
 
-        logger.debug("{} Repair completed between {} and {} on {}", previewKind.logPrefix(getId()), nodes.endpoint1, nodes.endpoint2, desc.columnFamily);
-        task.syncComplete(success, summaries);
+        logger.debug(String.format("[repair #%s] Repair completed between %s and %s on %s", getId(), nodes.endpoint1, nodes.endpoint2, desc.columnFamily));
+        task.syncComplete(success);
     }
 
     private String repairedNodes()
@@ -230,22 +234,16 @@ public class RepairSession extends AbstractFuture<RepairSessionResult> implement
         if (terminated)
             return;
 
-        logger.info("{} new session: will sync {} on range {} for {}.{}", previewKind.logPrefix(getId()), repairedNodes(), ranges, keyspace, Arrays.toString(cfnames));
+        logger.info(String.format("[repair #%s] new session: will sync %s on range %s for %s.%s", getId(), repairedNodes(), ranges, keyspace, Arrays.toString(cfnames)));
         Tracing.traceRepair("Syncing range {}", ranges);
-        if (!previewKind.isPreview())
-        {
-            SystemDistributedKeyspace.startRepairs(getId(), parentRepairSession, keyspace, cfnames, ranges, endpoints);
-        }
+        SystemDistributedKeyspace.startRepairs(getId(), parentRepairSession, keyspace, cfnames, ranges, endpoints);
 
         if (endpoints.isEmpty())
         {
-            logger.info("{} {}", previewKind.logPrefix(getId()), message = String.format("No neighbors to repair with on range %s: session completed", ranges));
+            logger.info("[repair #{}] {}", getId(), message = String.format("No neighbors to repair with on range %s: session completed", ranges));
             Tracing.traceRepair(message);
             set(new RepairSessionResult(id, keyspace, ranges, Lists.<RepairResult>newArrayList()));
-            if (!previewKind.isPreview())
-            {
-                SystemDistributedKeyspace.failRepairs(getId(), keyspace, cfnames, new RuntimeException(message));
-            }
+            SystemDistributedKeyspace.failRepairs(getId(), keyspace, cfnames, new RuntimeException(message));
             return;
         }
 
@@ -255,13 +253,10 @@ public class RepairSession extends AbstractFuture<RepairSessionResult> implement
             if (!FailureDetector.instance.isAlive(endpoint))
             {
                 message = String.format("Cannot proceed on repair because a neighbor (%s) is dead: session failed", endpoint);
-                logger.error("{} {}", previewKind.logPrefix(getId()), message);
+                logger.error("[repair #{}] {}", getId(), message);
                 Exception e = new IOException(message);
                 setException(e);
-                if (!previewKind.isPreview())
-                {
-                    SystemDistributedKeyspace.failRepairs(getId(), keyspace, cfnames, e);
-                }
+                SystemDistributedKeyspace.failRepairs(getId(), keyspace, cfnames, e);
                 return;
             }
         }
@@ -270,7 +265,7 @@ public class RepairSession extends AbstractFuture<RepairSessionResult> implement
         List<ListenableFuture<RepairResult>> jobs = new ArrayList<>(cfnames.length);
         for (String cfname : cfnames)
         {
-            RepairJob job = new RepairJob(this, cfname, isConsistent, previewKind);
+            RepairJob job = new RepairJob(this, cfname);
             executor.execute(job);
             jobs.add(job);
         }
@@ -281,7 +276,7 @@ public class RepairSession extends AbstractFuture<RepairSessionResult> implement
             public void onSuccess(List<RepairResult> results)
             {
                 // this repair session is completed
-                logger.info("{} {}", previewKind.logPrefix(getId()), "Session completed successfully");
+                logger.info("[repair #{}] {}", getId(), "Session completed successfully");
                 Tracing.traceRepair("Completed sync of range {}", ranges);
                 set(new RepairSessionResult(id, keyspace, ranges, results));
 
@@ -292,7 +287,7 @@ public class RepairSession extends AbstractFuture<RepairSessionResult> implement
 
             public void onFailure(Throwable t)
             {
-                logger.error("{} Session completed with the following error", previewKind.logPrefix(getId()), t);
+                logger.error(String.format("[repair #%s] Session completed with the following error", getId()), t);
                 Tracing.traceRepair("Session completed with the following error: {}", t);
                 forceShutdown(t);
             }
@@ -349,7 +344,7 @@ public class RepairSession extends AbstractFuture<RepairSessionResult> implement
             return;
 
         Exception exception = new IOException(String.format("Endpoint %s died", endpoint));
-        logger.error("{} session completed with the following error", previewKind.logPrefix(getId()), exception);
+        logger.error(String.format("[repair #%s] session completed with the following error", getId()), exception);
         // If a node failed, we stop everything (though there could still be some activity in the background)
         forceShutdown(exception);
     }

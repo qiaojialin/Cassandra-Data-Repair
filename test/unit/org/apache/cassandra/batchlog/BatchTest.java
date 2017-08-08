@@ -28,7 +28,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.RowUpdateBuilder;
@@ -62,7 +62,7 @@ public class BatchTest
     @Test
     public void testSerialization() throws IOException
     {
-        TableMetadata cfm = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF_STANDARD).metadata();
+        CFMetaData cfm = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF_STANDARD).metadata;
 
         long now = FBUtilities.timestampMicros();
         int version = MessagingService.current_version;
@@ -103,5 +103,51 @@ public class BatchTest
                 assertEquals(it1.next().toString(), Mutation.serializer.deserialize(in, version).toString());
             }
         }
+    }
+
+    /**
+     * This is just to test decodeMutations() when deserializing,
+     * since Batch will never be serialized at a version 2.2.
+     * @throws IOException
+     */
+    @Test
+    public void testSerializationNonCurrentVersion() throws IOException
+    {
+        CFMetaData cfm = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF_STANDARD).metadata;
+
+        long now = FBUtilities.timestampMicros();
+        int version = MessagingService.VERSION_22;
+        UUID uuid = UUIDGen.getTimeUUID();
+
+        List<Mutation> mutations = new ArrayList<>(10);
+        for (int i = 0; i < 10; i++)
+        {
+            mutations.add(new RowUpdateBuilder(cfm, FBUtilities.timestampMicros(), bytes(i))
+                          .clustering("name" + i)
+                          .add("val", "val" + i)
+                          .build());
+        }
+
+        Batch batch1 = Batch.createLocal(uuid, now, mutations);
+        assertEquals(uuid, batch1.id);
+        assertEquals(now, batch1.creationTime);
+        assertEquals(mutations, batch1.decodedMutations);
+
+        DataOutputBuffer out = new DataOutputBuffer();
+        Batch.serializer.serialize(batch1, out, version);
+
+        assertEquals(out.getLength(), Batch.serializer.serializedSize(batch1, version));
+
+        DataInputPlus dis = new DataInputBuffer(out.getData());
+        Batch batch2 = Batch.serializer.deserialize(dis, version);
+
+        assertEquals(batch1.id, batch2.id);
+        assertEquals(batch1.creationTime, batch2.creationTime);
+        assertEquals(batch1.decodedMutations.size(), batch2.decodedMutations.size());
+
+        Iterator<Mutation> it1 = batch1.decodedMutations.iterator();
+        Iterator<Mutation> it2 = batch2.decodedMutations.iterator();
+        while (it1.hasNext())
+            assertEquals(it1.next().toString(), it2.next().toString());
     }
 }

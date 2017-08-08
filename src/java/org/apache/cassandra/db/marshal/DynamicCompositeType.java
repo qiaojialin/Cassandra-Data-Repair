@@ -21,8 +21,6 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 
 import org.apache.cassandra.cql3.Term;
 import org.slf4j.Logger;
@@ -32,7 +30,6 @@ import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.serializers.TypeSerializer;
 import org.apache.cassandra.serializers.MarshalException;
-import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 /*
@@ -61,18 +58,21 @@ public class DynamicCompositeType extends AbstractCompositeType
     private final Map<Byte, AbstractType<?>> aliases;
 
     // interning instances
-    private static final ConcurrentMap<Map<Byte, AbstractType<?>>, DynamicCompositeType> instances = new ConcurrentHashMap<Map<Byte, AbstractType<?>>, DynamicCompositeType>();
+    private static final Map<Map<Byte, AbstractType<?>>, DynamicCompositeType> instances = new HashMap<Map<Byte, AbstractType<?>>, DynamicCompositeType>();
 
     public static synchronized DynamicCompositeType getInstance(TypeParser parser) throws ConfigurationException, SyntaxException
     {
         return getInstance(parser.getAliasParameters());
     }
 
-    public static DynamicCompositeType getInstance(Map<Byte, AbstractType<?>> aliases)
+    public static synchronized DynamicCompositeType getInstance(Map<Byte, AbstractType<?>> aliases)
     {
         DynamicCompositeType dct = instances.get(aliases);
         if (dct == null)
-            dct = instances.computeIfAbsent(aliases, k ->  new DynamicCompositeType(k));
+        {
+            dct = new DynamicCompositeType(aliases);
+            instances.put(aliases, dct);
+        }
         return dct;
     }
 
@@ -123,8 +123,7 @@ public class DynamicCompositeType extends AbstractCompositeType
          * If both types are ReversedType(Type), we need to compare on the wrapped type (which may differ between the two types) to avoid
          * incompatible comparisons being made.
          */
-        if ((comp1 instanceof ReversedType) && (comp2 instanceof ReversedType)) 
-        {
+        if ((comp1 instanceof ReversedType) && (comp2 instanceof ReversedType)) {
             comp1 = ((ReversedType<?>) comp1).baseType;
             comp2 = ((ReversedType<?>) comp2).baseType;
         }
@@ -382,7 +381,7 @@ public class DynamicCompositeType extends AbstractCompositeType
         }
 
         @Override
-        public String toJSONString(ByteBuffer buffer, ProtocolVersion protocolVersion)
+        public String toJSONString(ByteBuffer buffer, int protocolVersion)
         {
             throw new UnsupportedOperationException();
         }

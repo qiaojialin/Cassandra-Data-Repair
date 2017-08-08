@@ -19,7 +19,7 @@ package org.apache.cassandra.db.rows;
 
 import java.security.MessageDigest;
 
-import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.Clusterable;
 
 /**
@@ -49,17 +49,14 @@ public interface Unfiltered extends Clusterable
      * Validate the data of this atom.
      *
      * @param metadata the metadata for the table this atom is part of.
-     * @throws org.apache.cassandra.serializers.MarshalException if some of the data in this atom is
+     * @throws MarshalException if some of the data in this atom is
      * invalid (some value is invalid for its column type, or some field
      * is nonsensical).
      */
-    public void validateData(TableMetadata metadata);
+    public void validateData(CFMetaData metadata);
 
-    public boolean isEmpty();
-
-    public String toString(TableMetadata metadata);
-    public String toString(TableMetadata metadata, boolean fullDetails);
-    public String toString(TableMetadata metadata, boolean includeClusterKeys, boolean fullDetails);
+    public String toString(CFMetaData metadata);
+    public String toString(CFMetaData metadata, boolean fullDetails);
 
     default boolean isRow()
     {

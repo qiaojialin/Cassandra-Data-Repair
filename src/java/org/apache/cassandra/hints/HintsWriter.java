@@ -27,13 +27,11 @@ import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
 import java.util.zip.CRC32;
 
-import com.google.common.annotations.VisibleForTesting;
-
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputBufferFixed;
-import org.apache.cassandra.utils.NativeLibrary;
+import org.apache.cassandra.utils.CLibrary;
 import org.apache.cassandra.utils.SyncUtil;
 import org.apache.cassandra.utils.Throwables;
 
@@ -41,20 +39,20 @@ import static org.apache.cassandra.utils.FBUtilities.updateChecksum;
 import static org.apache.cassandra.utils.FBUtilities.updateChecksumInt;
 import static org.apache.cassandra.utils.Throwables.perform;
 
-class HintsWriter implements AutoCloseable
+final class HintsWriter implements AutoCloseable
 {
     static final int PAGE_SIZE = 4096;
 
     private final File directory;
     private final HintsDescriptor descriptor;
     private final File file;
-    protected final FileChannel channel;
+    private final FileChannel channel;
     private final int fd;
-    protected final CRC32 globalCRC;
+    private final CRC32 globalCRC;
 
     private volatile long lastSyncPosition = 0L;
 
-    protected HintsWriter(File directory, HintsDescriptor descriptor, File file, FileChannel channel, int fd, CRC32 globalCRC)
+    private HintsWriter(File directory, HintsDescriptor descriptor, File file, FileChannel channel, int fd, CRC32 globalCRC)
     {
         this.directory = directory;
         this.descriptor = descriptor;
@@ -70,11 +68,11 @@ class HintsWriter implements AutoCloseable
         File file = new File(directory, descriptor.fileName());
 
         FileChannel channel = FileChannel.open(file.toPath(), StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
-        int fd = NativeLibrary.getfd(channel);
+        int fd = CLibrary.getfd(channel);
 
         CRC32 crc = new CRC32();
 
-        try (DataOutputBuffer dob = DataOutputBuffer.scratchBuffer.get())
+        try (DataOutputBuffer dob = new DataOutputBuffer())
         {
             // write the descriptor
             descriptor.serialize(dob);
@@ -88,10 +86,6 @@ class HintsWriter implements AutoCloseable
             throw e;
         }
 
-        if (descriptor.isEncrypted())
-            return new EncryptedHintsWriter(directory, descriptor, file, channel, fd, crc);
-        if (descriptor.isCompressed())
-            return new CompressedHintsWriter(directory, descriptor, file, channel, fd, crc);
         return new HintsWriter(directory, descriptor, file, channel, fd, crc);
     }
 
@@ -143,21 +137,6 @@ class HintsWriter implements AutoCloseable
         }
     }
 
-    @VisibleForTesting
-    File getFile()
-    {
-        return file;
-    }
-
-    /**
-     * Writes byte buffer into the file channel. Buffer should be flipped before calling this
-     */
-    protected void writeBuffer(ByteBuffer bb) throws IOException
-    {
-        updateChecksum(globalCRC, bb);
-        channel.write(bb);
-    }
-
     /**
      * The primary goal of the Session class is to be able to share the same buffers among potentially dozens or hundreds
      * of hints writers, and ensure that their contents are always written to the underlying channels in the end.
@@ -178,12 +157,6 @@ class HintsWriter implements AutoCloseable
             this.initialSize = initialSize;
         }
 
-        @VisibleForTesting
-        long getBytesWritten()
-        {
-            return bytesWritten;
-        }
-
         long position()
         {
             return initialSize + bytesWritten;
@@ -200,24 +173,22 @@ class HintsWriter implements AutoCloseable
         {
             bytesWritten += hint.remaining();
 
-            // if the hint to write won't fit in the aggregation buffer, flush it
-            if (hint.remaining() > buffer.remaining())
-            {
-                buffer.flip();
-                writeBuffer(buffer);
-                buffer.clear();
-            }
-
-            // if the hint fits in the aggregation buffer, then update the aggregation buffer,
-            // otherwise write the hint buffer to the channel
+            // if the hint fits in the aggregation buffer, then just update the aggregation buffer,
+            // otherwise write both the aggregation buffer and the new buffer to the channel
             if (hint.remaining() <= buffer.remaining())
             {
                 buffer.put(hint);
+                return;
             }
-            else
-            {
-                writeBuffer(hint);
-            }
+
+            buffer.flip();
+
+            // update file-global CRC checksum
+            updateChecksum(globalCRC, buffer);
+            updateChecksum(globalCRC, hint);
+
+            channel.write(new ByteBuffer[] { buffer, hint });
+            buffer.clear();
         }
 
         /**
@@ -276,7 +247,8 @@ class HintsWriter implements AutoCloseable
 
             if (buffer.remaining() > 0)
             {
-                writeBuffer(buffer);
+                updateChecksum(globalCRC, buffer);
+                channel.write(buffer);
             }
 
             buffer.clear();
@@ -295,7 +267,7 @@ class HintsWriter implements AutoCloseable
             // don't skip page cache for tiny files, on the assumption that if they are tiny, the target node is probably
             // alive, and if so, the file will be closed and dispatched shortly (within a minute), and the file will be dropped.
             if (position >= DatabaseDescriptor.getTrickleFsyncIntervalInKb() * 1024L)
-                NativeLibrary.trySkipCache(fd, 0, position - (position % PAGE_SIZE), file.getPath());
+                CLibrary.trySkipCache(fd, 0, position - (position % PAGE_SIZE), file.getPath());
         }
     }
 }

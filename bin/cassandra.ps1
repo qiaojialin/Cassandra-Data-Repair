@@ -184,7 +184,7 @@ Function PrintVersion()
     $pinfo = New-Object System.Diagnostics.ProcessStartInfo
     $pinfo.FileName = "$env:JAVA_BIN"
     $pinfo.UseShellExecute = $false
-    $pinfo.Arguments = "-Dlogback.configurationFile=logback-tools.xml -cp $env:CLASSPATH org.apache.cassandra.tools.GetVersion"
+    $pinfo.Arguments = "-cp $env:CLASSPATH org.apache.cassandra.tools.GetVersion"
     $p = New-Object System.Diagnostics.Process
     $p.StartInfo = $pinfo
     $p.Start() | Out-Null
@@ -298,8 +298,9 @@ Function VerifyPortsAreAvailable
     #   storage_port
     #   ssl_storage_port
     #   native_transport_port
+    #   rpc_port, which we'll match to rpc_address
     # and from env: JMX_PORT which we cache in our environment during SetCassandraEnvironment for this check
-    $yamlRegex = "storage_port:|ssl_storage_port:|native_transport_port:"
+    $yamlRegex = "storage_port:|ssl_storage_port:|native_transport_port:|rpc_port"
     $yaml = Get-Content "$env:CASSANDRA_CONF\cassandra.yaml"
     $portRegex = ":$env:JMX_PORT |"
 

@@ -33,8 +33,7 @@ import org.junit.Test;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.Util.PartitionerSwitcher;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.RandomPartitioner;
@@ -62,7 +61,6 @@ public class LeaveAndBootstrapTest
     @BeforeClass
     public static void defineSchema() throws Exception
     {
-        DatabaseDescriptor.daemonInitialization();
         partitionerSwitcher = Util.switchPartitioner(partitioner);
         SchemaLoader.loadSchema();
         SchemaLoader.schemaDefinition("LeaveAndBootstrapTest");
@@ -98,7 +96,7 @@ public class LeaveAndBootstrapTest
         Util.createInitialRing(ss, partitioner, endpointTokens, keyTokens, hosts, hostIds, RING_SIZE);
 
         Map<Token, List<InetAddress>> expectedEndpoints = new HashMap<Token, List<InetAddress>>();
-        for (String keyspaceName : Schema.instance.getNonLocalStrategyKeyspaces())
+        for (String keyspaceName : Schema.instance.getNonSystemKeyspaces())
         {
             for (Token token : keyTokens)
             {
@@ -122,7 +120,7 @@ public class LeaveAndBootstrapTest
         PendingRangeCalculatorService.instance.blockUntilFinished();
 
         AbstractReplicationStrategy strategy;
-        for (String keyspaceName : Schema.instance.getNonLocalStrategyKeyspaces())
+        for (String keyspaceName : Schema.instance.getNonSystemKeyspaces())
         {
             strategy = getStrategy(keyspaceName, tmd);
             for (Token token : keyTokens)
@@ -556,7 +554,7 @@ public class LeaveAndBootstrapTest
         Gossiper.instance.injectApplicationState(hosts.get(2), ApplicationState.TOKENS, valueFactory.tokens(Collections.singleton(keyTokens.get(2))));
         ss.onChange(hosts.get(2), ApplicationState.STATUS, valueFactory.normal(Collections.singleton(keyTokens.get(2))));
 
-        assertTrue(tmd.getSizeOfLeavingEndpoints() == 0);
+        assertTrue(tmd.getLeavingEndpoints().isEmpty());
         assertEquals(keyTokens.get(2), tmd.getToken(hosts.get(2)));
 
         // node 3 goes through leave and left and then jumps to normal at its new token
@@ -567,7 +565,7 @@ public class LeaveAndBootstrapTest
         ss.onChange(hosts.get(2), ApplicationState.STATUS, valueFactory.normal(Collections.singleton(keyTokens.get(4))));
 
         assertTrue(tmd.getBootstrapTokens().isEmpty());
-        assertTrue(tmd.getSizeOfLeavingEndpoints() == 0);
+        assertTrue(tmd.getLeavingEndpoints().isEmpty());
         assertEquals(keyTokens.get(4), tmd.getToken(hosts.get(2)));
     }
 
@@ -715,7 +713,7 @@ public class LeaveAndBootstrapTest
 
     private AbstractReplicationStrategy getStrategy(String keyspaceName, TokenMetadata tmd)
     {
-        KeyspaceMetadata ksmd = Schema.instance.getKeyspaceMetadata(keyspaceName);
+        KeyspaceMetadata ksmd = Schema.instance.getKSMetaData(keyspaceName);
         return AbstractReplicationStrategy.createReplicationStrategy(
                 keyspaceName,
                 ksmd.params.replication.klass,

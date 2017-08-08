@@ -17,9 +17,11 @@
  */
 package org.apache.cassandra.cql3.restrictions;
 
-import java.util.List;
+import java.util.Collections;
 
-import org.apache.cassandra.schema.ColumnMetadata;
+import com.google.common.collect.Iterables;
+
+import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.cql3.functions.Function;
@@ -62,7 +64,7 @@ final class TermSlice
      */
     public static TermSlice newInstance(Bound bound, boolean include, Term term)
     {
-        return  bound.isStart() ? new TermSlice(term, include, null, false)
+        return  bound.isStart() ? new TermSlice(term, include, null, false) 
                                 : new TermSlice(null, false, term, include);
     }
 
@@ -112,14 +114,14 @@ final class TermSlice
         {
             assert !otherSlice.hasBound(Bound.START);
 
-            return new TermSlice(bound(Bound.START),
+            return new TermSlice(bound(Bound.START), 
                                   isInclusive(Bound.START),
                                   otherSlice.bound(Bound.END),
                                   otherSlice.isInclusive(Bound.END));
         }
         assert !otherSlice.hasBound(Bound.END);
 
-        return new TermSlice(otherSlice.bound(Bound.START),
+        return new TermSlice(otherSlice.bound(Bound.START), 
                               otherSlice.isInclusive(Bound.START),
                               bound(Bound.END),
                               isInclusive(Bound.END));
@@ -155,7 +157,7 @@ final class TermSlice
      * @return <code>true</code> this type of <code>TermSlice</code> is supported by the specified index,
      * <code>false</code> otherwise.
      */
-    public boolean isSupportedBy(ColumnMetadata column, Index index)
+    public boolean isSupportedBy(ColumnDefinition column, Index index)
     {
         boolean supported = false;
 
@@ -169,12 +171,15 @@ final class TermSlice
         return supported;
     }
 
-    public void addFunctionsTo(List<Function> functions)
+    public Iterable<Function> getFunctions()
     {
-        if (hasBound(Bound.START))
-            bound(Bound.START).addFunctionsTo(functions);
-
-        if (hasBound(Bound.END))
-            bound(Bound.END).addFunctionsTo(functions);
+        if (hasBound(Bound.START) && hasBound(Bound.END))
+            return Iterables.concat(bound(Bound.START).getFunctions(), bound(Bound.END).getFunctions());
+        else if (hasBound(Bound.START))
+            return bound(Bound.START).getFunctions();
+        else if (hasBound(Bound.END))
+            return bound(Bound.END).getFunctions();
+        else
+            return Collections.emptySet();
     }
 }

@@ -22,7 +22,6 @@ import java.util.Set;
 
 import com.google.common.collect.ImmutableSet;
 
-import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.schema.*;
 import org.apache.cassandra.schema.TableParams.Option;
@@ -31,7 +30,6 @@ import static java.lang.String.format;
 
 public final class TableAttributes extends PropertyDefinitions
 {
-    private static final String KW_ID = "id";
     private static final Set<String> validKeywords;
     private static final Set<String> obsoleteKeywords;
 
@@ -40,7 +38,6 @@ public final class TableAttributes extends PropertyDefinitions
         ImmutableSet.Builder<String> validBuilder = ImmutableSet.builder();
         for (Option option : Option.values())
             validBuilder.add(option.toString());
-        validBuilder.add(KW_ID);
         validKeywords = validBuilder.build();
         obsoleteKeywords = ImmutableSet.of();
     }
@@ -58,22 +55,7 @@ public final class TableAttributes extends PropertyDefinitions
 
     public TableParams asAlteredTableParams(TableParams previous)
     {
-        if (getId() != null)
-            throw new ConfigurationException("Cannot alter table id.");
-        return build(previous.unbuild());
-    }
-
-    public TableId getId() throws ConfigurationException
-    {
-        String id = getSimple(KW_ID);
-        try
-        {
-            return id != null ? TableId.fromString(id) : null;
-        }
-        catch (IllegalArgumentException e)
-        {
-            throw new ConfigurationException("Invalid table id", e);
-        }
+        return build(TableParams.builder(previous));
     }
 
     private TableParams build(TableParams.Builder builder)
@@ -130,9 +112,6 @@ public final class TableAttributes extends PropertyDefinitions
         if (hasOption(Option.CRC_CHECK_CHANCE))
             builder.crcCheckChance(getDouble(Option.CRC_CHECK_CHANCE));
 
-        if (hasOption(Option.CDC))
-            builder.cdc(getBoolean(Option.CDC.toString(), false));
-
         return builder.build();
     }
 
@@ -141,7 +120,7 @@ public final class TableAttributes extends PropertyDefinitions
         String value = compressionOpts.get(Option.CRC_CHECK_CHANCE.toString().toLowerCase());
         try
         {
-            return Double.valueOf(value);
+            return Double.parseDouble(value);
         }
         catch (NumberFormatException e)
         {

@@ -27,8 +27,6 @@ import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 
-import org.apache.cassandra.utils.FBUtilities;
-
 /**
  * Stream session info.
  */
@@ -191,10 +189,5 @@ public final class SessionInfo implements Serializable
             }
         });
         return Iterables.size(completed);
-    }
-
-    public SessionSummary createSummary()
-    {
-        return new SessionSummary(FBUtilities.getBroadcastAddress(), peer, receivingSummaries, sendingSummaries);
     }
 }

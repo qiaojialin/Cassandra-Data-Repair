@@ -21,7 +21,6 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.SocketException;
 
-import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.config.Config;
@@ -33,12 +32,6 @@ import static org.junit.Assert.assertTrue;
 
 public class JVMStabilityInspectorTest
 {
-    @BeforeClass
-    public static void initDD()
-    {
-        DatabaseDescriptor.daemonInitialization();
-    }
-
     @Test
     public void testKill() throws Exception
     {

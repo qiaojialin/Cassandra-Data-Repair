@@ -28,8 +28,6 @@ import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 public interface ISSTableScanner extends UnfilteredPartitionIterator
 {
     public long getLengthInBytes();
-    public long getCompressedLengthInBytes();
     public long getCurrentPosition();
-    public long getBytesScanned();
     public String getBackingFiles();
 }

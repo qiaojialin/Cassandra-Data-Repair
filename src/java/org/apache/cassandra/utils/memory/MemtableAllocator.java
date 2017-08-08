@@ -20,6 +20,7 @@ package org.apache.cassandra.utils.memory;
 
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.utils.concurrent.OpOrder;
@@ -31,7 +32,7 @@ public abstract class MemtableAllocator
     private final SubAllocator offHeap;
     volatile LifeCycle state = LifeCycle.LIVE;
 
-    enum LifeCycle
+    static enum LifeCycle
     {
         LIVE, DISCARDING, DISCARDED;
         LifeCycle transition(LifeCycle targetState)
@@ -60,7 +61,7 @@ public abstract class MemtableAllocator
 
     public abstract Row.Builder rowBuilder(OpOrder.Group opGroup);
     public abstract DecoratedKey clone(DecoratedKey key, OpOrder.Group opGroup);
-    public abstract EnsureOnHeap ensureOnHeap();
+    public abstract DataReclaimer reclaimer();
 
     public SubAllocator onHeap()
     {
@@ -100,6 +101,41 @@ public abstract class MemtableAllocator
     {
         return state == LifeCycle.LIVE;
     }
+
+    public static interface DataReclaimer
+    {
+        public DataReclaimer reclaim(Row row);
+        public DataReclaimer reclaimImmediately(Row row);
+        public DataReclaimer reclaimImmediately(DecoratedKey key);
+        public void cancel();
+        public void commit();
+    }
+
+    public static final DataReclaimer NO_OP = new DataReclaimer()
+    {
+        public DataReclaimer reclaim(Row update)
+        {
+            return this;
+        }
+
+        public DataReclaimer reclaimImmediately(Row update)
+        {
+            return this;
+        }
+
+        public DataReclaimer reclaimImmediately(DecoratedKey key)
+        {
+            return this;
+        }
+
+        @Override
+        public void cancel()
+        {}
+
+        @Override
+        public void commit()
+        {}
+    };
 
     /** Mark the BB as unused, permitting it to be reclaimed */
     public static final class SubAllocator
@@ -147,7 +183,7 @@ public abstract class MemtableAllocator
                     acquired(size);
                     return;
                 }
-                WaitQueue.Signal signal = opGroup.isBlockingSignal(parent.hasRoom().register(parent.blockedTimerContext()));
+                WaitQueue.Signal signal = opGroup.isBlockingSignal(parent.hasRoom().register());
                 boolean allocated = parent.tryAllocate(size);
                 if (allocated || opGroup.isBlocking())
                 {
@@ -214,6 +250,5 @@ public abstract class MemtableAllocator
         private static final AtomicLongFieldUpdater<SubAllocator> ownsUpdater = AtomicLongFieldUpdater.newUpdater(SubAllocator.class, "owns");
         private static final AtomicLongFieldUpdater<SubAllocator> reclaimingUpdater = AtomicLongFieldUpdater.newUpdater(SubAllocator.class, "reclaiming");
     }
-
 
 }

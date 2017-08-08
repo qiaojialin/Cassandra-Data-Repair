@@ -1,23 +1,3 @@
-/*
- *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
- */
 package org.apache.cassandra.db.lifecycle;
 
 import java.io.File;
@@ -28,12 +8,10 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
 import com.google.common.annotations.VisibleForTesting;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.Directories;
 
@@ -44,8 +22,6 @@ import static org.apache.cassandra.db.Directories.*;
  */
 final class LogAwareFileLister
 {
-    private static final Logger logger = LoggerFactory.getLogger(LogAwareFileLister.class);
-
     // The folder to scan
     private final Path folder;
 
@@ -122,12 +98,10 @@ final class LogAwareFileLister
      */
     void classifyFiles(File txnFile)
     {
-        try (LogFile txn = LogFile.make(txnFile))
-        {
-            readTxnLog(txn);
-            classifyFiles(txn);
-            files.put(txnFile, FileType.TXN_LOG);
-        }
+        LogFile txn = LogFile.make(txnFile);
+        readTxnLog(txn);
+        classifyFiles(txn);
+        files.put(txnFile, FileType.TXN_LOG);
     }
 
     void readTxnLog(LogFile txn)
@@ -138,8 +112,8 @@ final class LogAwareFileLister
 
     void classifyFiles(LogFile txnFile)
     {
-        Map<LogRecord, Set<File>> oldFiles = txnFile.getFilesOfType(folder, files.navigableKeySet(), LogRecord.Type.REMOVE);
-        Map<LogRecord, Set<File>> newFiles = txnFile.getFilesOfType(folder, files.navigableKeySet(), LogRecord.Type.ADD);
+        Map<LogRecord, Set<File>> oldFiles = txnFile.getFilesOfType(files.navigableKeySet(), LogRecord.Type.REMOVE);
+        Map<LogRecord, Set<File>> newFiles = txnFile.getFilesOfType(files.navigableKeySet(), LogRecord.Type.ADD);
 
         if (txnFile.completed())
         { // last record present, filter regardless of disk status
@@ -147,13 +121,13 @@ final class LogAwareFileLister
             return;
         }
 
-        if (allFilesPresent(oldFiles))
-        {  // all old files present, transaction is in progress, this will filter as aborted
+        if (allFilesPresent(txnFile, oldFiles, newFiles))
+        {  // all files present, transaction is in progress, this will filter as aborted
             setTemporary(txnFile, oldFiles.values(), newFiles.values());
             return;
         }
 
-        // some old files are missing, we expect the txn file to either also be missing or completed, so check
+        // some files are missing, we expect the txn file to either also be missing or completed, so check
         // disk state again to resolve any previous races on non-atomic directory listing platforms
 
         // if txn file also gone, then do nothing (all temporary should be gone, we could remove them if any)
@@ -169,29 +143,23 @@ final class LogAwareFileLister
             return;
         }
 
-        logger.error("Failed to classify files in {}\n" +
-                     "Some old files are missing but the txn log is still there and not completed\n" +
-                     "Files in folder:\n{}\nTxn: {}",
-                     folder,
-                     files.isEmpty()
-                        ? "\t-"
-                        : String.join("\n", files.keySet().stream().map(f -> String.format("\t%s", f)).collect(Collectors.toList())),
-                     txnFile.toString(true));
-
-        // some old files are missing and yet the txn is still there and not completed
-        // something must be wrong (see comment at the top of LogTransaction requiring txn to be
+        // some files are missing and yet the txn is still there and not completed
+        // something must be wrong (see comment at the top of this file requiring txn to be
         // completed before obsoleting or aborting sstables)
         throw new RuntimeException(String.format("Failed to list directory files in %s, inconsistent disk state for transaction %s",
                                                  folder,
                                                  txnFile));
     }
 
-    /** See if all files are present */
-    private static boolean allFilesPresent(Map<LogRecord, Set<File>> oldFiles)
+    /** See if all files are present or if only the last record files are missing and it's a NEW record */
+    private static boolean allFilesPresent(LogFile txnFile, Map<LogRecord, Set<File>> oldFiles, Map<LogRecord, Set<File>> newFiles)
     {
-        return !oldFiles.entrySet().stream()
-                        .filter((e) -> e.getKey().numFiles > e.getValue().size())
-                        .findFirst().isPresent();
+        LogRecord lastRecord = txnFile.getLastRecord();
+        return !Stream.concat(oldFiles.entrySet().stream(),
+                              newFiles.entrySet().stream()
+                                      .filter((e) -> e.getKey() != lastRecord))
+                      .filter((e) -> e.getKey().numFiles > e.getValue().size())
+                      .findFirst().isPresent();
     }
 
     private void setTemporary(LogFile txnFile, Collection<Set<File>> oldFiles, Collection<Set<File>> newFiles)
@@ -200,5 +168,28 @@ final class LogAwareFileLister
         temporary.stream()
                  .flatMap(Set::stream)
                  .forEach((f) -> this.files.put(f, FileType.TEMPORARY));
+    }
+
+    @VisibleForTesting
+    static Set<File> getTemporaryFiles(File folder)
+    {
+        return listFiles(folder, FileType.TEMPORARY);
+    }
+
+    @VisibleForTesting
+    static Set<File> getFinalFiles(File folder)
+    {
+        return listFiles(folder, FileType.FINAL);
+    }
+
+    @VisibleForTesting
+    static Set<File> listFiles(File folder, FileType ... types)
+    {
+        Collection<FileType> match = Arrays.asList(types);
+        return new LogAwareFileLister(folder.toPath(),
+                                      (file, type) -> match.contains(type),
+                                      OnTxnErr.IGNORE).list()
+                                                      .stream()
+                                                      .collect(Collectors.toSet());
     }
 }

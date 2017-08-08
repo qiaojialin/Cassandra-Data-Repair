@@ -75,7 +75,7 @@ public class SimpleClient implements Closeable
 
     protected final ResponseHandler responseHandler = new ResponseHandler();
     protected final Connection.Tracker tracker = new ConnectionTracker();
-    protected final ProtocolVersion version;
+    protected final int version;
     // We don't track connection really, so we don't need one Connection per channel
     protected Connection connection;
     protected Bootstrap bootstrap;
@@ -84,36 +84,28 @@ public class SimpleClient implements Closeable
 
     private final Connection.Factory connectionFactory = new Connection.Factory()
     {
-        public Connection newConnection(Channel channel, ProtocolVersion version)
+        public Connection newConnection(Channel channel, int version)
         {
             return connection;
         }
     };
 
-    public SimpleClient(String host, int port, ProtocolVersion version, ClientEncryptionOptions encryptionOptions)
+    public SimpleClient(String host, int port, int version, ClientEncryptionOptions encryptionOptions)
     {
-        this(host, port, version, false, encryptionOptions);
+        this.host = host;
+        this.port = port;
+        this.version = version;
+        this.encryptionOptions = encryptionOptions;
     }
 
     public SimpleClient(String host, int port, ClientEncryptionOptions encryptionOptions)
     {
-        this(host, port, ProtocolVersion.CURRENT, encryptionOptions);
+        this(host, port, Server.CURRENT_VERSION, encryptionOptions);
     }
 
-    public SimpleClient(String host, int port, ProtocolVersion version)
+    public SimpleClient(String host, int port, int version)
     {
         this(host, port, version, new ClientEncryptionOptions());
-    }
-
-    public SimpleClient(String host, int port, ProtocolVersion version, boolean useBeta, ClientEncryptionOptions encryptionOptions)
-    {
-        this.host = host;
-        this.port = port;
-        if (version.isBeta() && !useBeta)
-            throw new IllegalArgumentException(String.format("Beta version of server used (%s), but USE_BETA flag is not set", version));
-
-        this.version = version;
-        this.encryptionOptions = encryptionOptions;
     }
 
     public SimpleClient(String host, int port)
@@ -189,7 +181,7 @@ public class SimpleClient implements Closeable
 
     public ResultMessage.Prepared prepare(String query)
     {
-        Message.Response msg = execute(new PrepareMessage(query, null));
+        Message.Response msg = execute(new PrepareMessage(query));
         assert msg instanceof ResultMessage.Prepared;
         return (ResultMessage.Prepared)msg;
     }
@@ -299,8 +291,8 @@ public class SimpleClient implements Closeable
             super.initChannel(channel);
             SSLEngine sslEngine = sslContext.createSSLEngine();
             sslEngine.setUseClientMode(true);
-            String[] suites = SSLFactory.filterCipherSuites(sslEngine.getSupportedCipherSuites(), encryptionOptions.cipher_suites);
-            sslEngine.setEnabledCipherSuites(suites);
+            sslEngine.setEnabledCipherSuites(encryptionOptions.cipher_suites);
+            sslEngine.setEnabledProtocols(SSLFactory.ACCEPTED_PROTOCOLS);
             channel.pipeline().addFirst("ssl", new SslHandler(sslEngine));
         }
     }

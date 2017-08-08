@@ -47,31 +47,26 @@ public class WriteResponseHandler<T> extends AbstractWriteResponseHandler<T>
                                 ConsistencyLevel consistencyLevel,
                                 Keyspace keyspace,
                                 Runnable callback,
-                                WriteType writeType,
-                                long queryStartNanoTime)
+                                WriteType writeType)
     {
-        super(keyspace, writeEndpoints, pendingEndpoints, consistencyLevel, callback, writeType, queryStartNanoTime);
+        super(keyspace, writeEndpoints, pendingEndpoints, consistencyLevel, callback, writeType);
         responses = totalBlockFor();
     }
 
-    public WriteResponseHandler(InetAddress endpoint, WriteType writeType, Runnable callback, long queryStartNanoTime)
+    public WriteResponseHandler(InetAddress endpoint, WriteType writeType, Runnable callback)
     {
-        this(Arrays.asList(endpoint), Collections.<InetAddress>emptyList(), ConsistencyLevel.ONE, null, callback, writeType, queryStartNanoTime);
+        this(Arrays.asList(endpoint), Collections.<InetAddress>emptyList(), ConsistencyLevel.ONE, null, callback, writeType);
     }
 
-    public WriteResponseHandler(InetAddress endpoint, WriteType writeType, long queryStartNanoTime)
+    public WriteResponseHandler(InetAddress endpoint, WriteType writeType)
     {
-        this(endpoint, writeType, null, queryStartNanoTime);
+        this(endpoint, writeType, null);
     }
 
     public void response(MessageIn<T> m)
     {
         if (responsesUpdater.decrementAndGet(this) == 0)
             signal();
-        //Must be last after all subclass processing
-        //The two current subclasses both assume logResponseToIdealCLDelegate is called
-        //here.
-        logResponseToIdealCLDelegate(m);
     }
 
     protected int ackCount()

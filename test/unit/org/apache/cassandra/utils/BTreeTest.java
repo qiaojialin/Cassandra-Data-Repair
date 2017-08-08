@@ -21,7 +21,6 @@ import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
 
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Lists;
 import org.junit.Test;
 
 import junit.framework.Assert;
@@ -129,30 +128,6 @@ public class BTreeTest
             checkResult(i, BTree.update(BTree.build(seq(i), noOp), CMP, seq(i), updateF));
     }
 
-    @Test
-    public void testApplyForwards()
-    {
-        List<Integer> input = seq(71);
-        Object[] btree = BTree.build(input, noOp);
-
-        final List<Integer> result = new ArrayList<>();
-        BTree.<Integer>apply(btree, i -> result.add(i), false);
-
-        org.junit.Assert.assertArrayEquals(input.toArray(),result.toArray());
-    }
-
-    @Test
-    public void testApplyReverse()
-    {
-        List<Integer> input = seq(71);
-        Object[] btree = BTree.build(input, noOp);
-
-        final List<Integer> result = new ArrayList<>();
-        BTree.<Integer>apply(btree, i -> result.add(i), true);
-
-        org.junit.Assert.assertArrayEquals(Lists.reverse(input).toArray(),result.toArray());
-    }
-
     /**
      * Tests that the apply method of the <code>UpdateFunction</code> is only called once with each key update.
      * (see CASSANDRA-8018).
@@ -239,16 +214,14 @@ public class BTreeTest
                 builder.add(i);
             // for sorted input, check non-resolve path works before checking resolution path
             checkResolverOutput(count, builder.build(), BTree.Dir.ASC);
-            builder = BTree.builder(Comparator.naturalOrder());
-            builder.setQuickResolver(resolver);
+            builder.reuse();
             for (int i = 0 ; i < 10 ; i++)
             {
                 // now do a few runs of randomized inputs
                 for (Accumulator j : resolverInput(count, true))
                     builder.add(j);
                 checkResolverOutput(count, builder.build(), BTree.Dir.ASC);
-                builder = BTree.builder(Comparator.naturalOrder());
-                builder.setQuickResolver(resolver);
+                builder.reuse();
             }
             for (List<Accumulator> add : splitResolverInput(count))
             {
@@ -258,6 +231,7 @@ public class BTreeTest
                     builder.addAll(new TreeSet<>(add));
             }
             checkResolverOutput(count, builder.build(), BTree.Dir.ASC);
+            builder.reuse();
         }
     }
 
@@ -304,14 +278,7 @@ public class BTreeTest
                 builder.add(i);
             // for sorted input, check non-resolve path works before checking resolution path
             Assert.assertTrue(Iterables.elementsEqual(sorted, BTree.iterable(builder.build())));
-
-            builder = BTree.builder(Comparator.naturalOrder());
-            builder.auto(false);
-            for (Accumulator i : sorted)
-                builder.add(i);
-            // check resolution path
             checkResolverOutput(count, builder.resolve(resolver).build(), BTree.Dir.ASC);
-
             builder = BTree.builder(Comparator.naturalOrder());
             builder.auto(false);
             for (int i = 0 ; i < 10 ; i++)
@@ -320,13 +287,11 @@ public class BTreeTest
                 for (Accumulator j : resolverInput(count, true))
                     builder.add(j);
                 checkResolverOutput(count, builder.sort().resolve(resolver).build(), BTree.Dir.ASC);
-                builder = BTree.builder(Comparator.naturalOrder());
-                builder.auto(false);
+                builder.reuse();
                 for (Accumulator j : resolverInput(count, true))
                     builder.add(j);
                 checkResolverOutput(count, builder.sort().reverse().resolve(resolver).build(), BTree.Dir.DESC);
-                builder = BTree.builder(Comparator.naturalOrder());
-                builder.auto(false);
+                builder.reuse();
             }
         }
     }

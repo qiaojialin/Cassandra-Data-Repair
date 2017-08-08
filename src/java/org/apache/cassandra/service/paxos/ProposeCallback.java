@@ -50,16 +50,16 @@ public class ProposeCallback extends AbstractPaxosCallback<Boolean>
     private final int requiredAccepts;
     private final boolean failFast;
 
-    public ProposeCallback(int totalTargets, int requiredTargets, boolean failFast, ConsistencyLevel consistency, long queryStartNanoTime)
+    public ProposeCallback(int totalTargets, int requiredTargets, boolean failFast, ConsistencyLevel consistency)
     {
-        super(totalTargets, consistency, queryStartNanoTime);
+        super(totalTargets, consistency);
         this.requiredAccepts = requiredTargets;
         this.failFast = failFast;
     }
 
     public void response(MessageIn<Boolean> msg)
     {
-        logger.trace("Propose response {} from {}", msg.payload, msg.from);
+        logger.debug("Propose response {} from {}", msg.payload, msg.from);
 
         if (msg.payload)
             accepts.incrementAndGet();

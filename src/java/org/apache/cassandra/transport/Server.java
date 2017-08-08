@@ -21,7 +21,9 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
-import java.util.*;
+import java.util.EnumMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.net.ssl.SSLContext;
@@ -35,11 +37,11 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
 import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.epoll.EpollServerSocketChannel;
+import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.channel.group.ChannelGroup;
 import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
-import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.util.Version;
 import io.netty.util.concurrent.EventExecutor;
@@ -49,8 +51,6 @@ import io.netty.util.internal.logging.Slf4JLoggerFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.schema.SchemaChangeListener;
 import org.apache.cassandra.security.SSLFactory;
 import org.apache.cassandra.service.*;
 import org.apache.cassandra.transport.messages.EventMessage;
@@ -66,11 +66,16 @@ public class Server implements CassandraDaemon.Server
     private static final Logger logger = LoggerFactory.getLogger(Server.class);
     private static final boolean useEpoll = NativeTransportService.useEpoll();
 
+    public static final int VERSION_3 = 3;
+    public static final int VERSION_4 = 4;
+    public static final int CURRENT_VERSION = VERSION_4;
+    public static final int MIN_SUPPORTED_VERSION = VERSION_3;
+
     private final ConnectionTracker connectionTracker = new ConnectionTracker();
 
     private final Connection.Factory connectionFactory = new Connection.Factory()
     {
-        public Connection newConnection(Channel channel, ProtocolVersion version)
+        public Connection newConnection(Channel channel, int version)
         {
             return new ServerConnection(channel, version, connectionTracker);
         }
@@ -102,7 +107,7 @@ public class Server implements CassandraDaemon.Server
             eventExecutorGroup = builder.eventExecutorGroup;
         EventNotifier notifier = new EventNotifier(this);
         StorageService.instance.register(notifier);
-        Schema.instance.registerListener(notifier);
+        MigrationManager.instance.register(notifier);
     }
 
     public void stop()
@@ -118,7 +123,7 @@ public class Server implements CassandraDaemon.Server
 
     public synchronized void start()
     {
-        if(isRunning())
+        if(isRunning()) 
             return;
 
         // Configure the server.
@@ -133,10 +138,9 @@ public class Server implements CassandraDaemon.Server
         if (workerGroup != null)
             bootstrap = bootstrap.group(workerGroup);
 
+        final EncryptionOptions.ClientEncryptionOptions clientEnc = DatabaseDescriptor.getClientEncryptionOptions();
         if (this.useSSL)
         {
-            final EncryptionOptions.ClientEncryptionOptions clientEnc = DatabaseDescriptor.getClientEncryptionOptions();
-
             if (clientEnc.optional)
             {
                 logger.info("Enabling optionally encrypted CQL connections between client and server");
@@ -169,12 +173,12 @@ public class Server implements CassandraDaemon.Server
     {
         return connectionTracker.getConnectedClients();
     }
-
+    
     private void close()
     {
         // Close opened connections
         connectionTracker.closeAll();
-
+        
         logger.info("Stop listening for CQL clients");
     }
 
@@ -276,7 +280,7 @@ public class Server implements CassandraDaemon.Server
         public int getConnectedClients()
         {
             /*
-              - When server is running: allChannels contains all clients' connections (channels)
+              - When server is running: allChannels contains all clients' connections (channels) 
                 plus one additional channel used for the server's own bootstrap.
                - When server is stopped: the size is 0
             */
@@ -351,13 +355,12 @@ public class Server implements CassandraDaemon.Server
             }
         }
 
-        protected final SslHandler createSslHandler()
-        {
+        protected final SslHandler createSslHandler() {
             SSLEngine sslEngine = sslContext.createSSLEngine();
             sslEngine.setUseClientMode(false);
-            String[] suites = SSLFactory.filterCipherSuites(sslEngine.getSupportedCipherSuites(), encryptionOptions.cipher_suites);
-            sslEngine.setEnabledCipherSuites(suites);
+            sslEngine.setEnabledCipherSuites(encryptionOptions.cipher_suites);
             sslEngine.setNeedClientAuth(encryptionOptions.require_client_auth);
+            sslEngine.setEnabledProtocols(SSLFactory.ACCEPTED_PROTOCOLS);
             return new SslHandler(sslEngine);
         }
     }
@@ -450,21 +453,16 @@ public class Server implements CassandraDaemon.Server
         }
     }
 
-    private static class EventNotifier extends SchemaChangeListener implements IEndpointLifecycleSubscriber
+    private static class EventNotifier extends MigrationListener implements IEndpointLifecycleSubscriber
     {
         private final Server server;
 
-        // We keep track of the latest status change events we have sent to avoid sending duplicates
-        // since StorageService may send duplicate notifications (CASSANDRA-7816, CASSANDRA-8236, CASSANDRA-9156)
+        // We keep track of the latest events we have sent to avoid sending duplicates
+        // since StorageService may send duplicate notifications (CASSANDRA-7816, CASSANDRA-8236)
         private final Map<InetAddress, LatestEvent> latestEvents = new ConcurrentHashMap<>();
-        // We also want to delay delivering a NEW_NODE notification until the new node has set its RPC ready
-        // state. This tracks the endpoints which have joined, but not yet signalled they're ready for clients
-        private final Set<InetAddress> endpointsPendingJoinedNotification = ConcurrentHashMap.newKeySet();
-
 
         private static final InetAddress bindAll;
-        static
-        {
+        static {
             try
             {
                 bindAll = InetAddress.getByAddress(new byte[4]);
@@ -511,7 +509,7 @@ public class Server implements CassandraDaemon.Server
             // which is not useful to any driver and in fact may cauase serious problems to some drivers,
             // see CASSANDRA-10052
             if (!endpoint.equals(FBUtilities.getBroadcastAddress()) &&
-                event.nodeAddress().equals(FBUtilities.getBroadcastRpcAddress()))
+                event.nodeAddress().equals(DatabaseDescriptor.getBroadcastRpcAddress()))
                 return;
 
             send(event);
@@ -524,10 +522,7 @@ public class Server implements CassandraDaemon.Server
 
         public void onJoinCluster(InetAddress endpoint)
         {
-            if (!StorageService.instance.isRpcReady(endpoint))
-                endpointsPendingJoinedNotification.add(endpoint);
-            else
-                onTopologyChange(endpoint, Event.TopologyChange.newNode(getRpcAddress(endpoint), server.socket.getPort()));
+            onTopologyChange(endpoint, Event.TopologyChange.newNode(getRpcAddress(endpoint), server.socket.getPort()));
         }
 
         public void onLeaveCluster(InetAddress endpoint)
@@ -542,9 +537,6 @@ public class Server implements CassandraDaemon.Server
 
         public void onUp(InetAddress endpoint)
         {
-            if (endpointsPendingJoinedNotification.remove(endpoint))
-                onJoinCluster(endpoint);
-
             onStatusChange(endpoint, Event.StatusChange.nodeUp(getRpcAddress(endpoint), server.socket.getPort()));
         }
 
@@ -586,12 +578,12 @@ public class Server implements CassandraDaemon.Server
             send(new Event.SchemaChange(Event.SchemaChange.Change.CREATED, ksName));
         }
 
-        public void onCreateTable(String ksName, String cfName)
+        public void onCreateColumnFamily(String ksName, String cfName)
         {
             send(new Event.SchemaChange(Event.SchemaChange.Change.CREATED, Event.SchemaChange.Target.TABLE, ksName, cfName));
         }
 
-        public void onCreateType(String ksName, String typeName)
+        public void onCreateUserType(String ksName, String typeName)
         {
             send(new Event.SchemaChange(Event.SchemaChange.Change.CREATED, Event.SchemaChange.Target.TYPE, ksName, typeName));
         }
@@ -608,28 +600,28 @@ public class Server implements CassandraDaemon.Server
                                         ksName, aggregateName, AbstractType.asCQLTypeStringList(argTypes)));
         }
 
-        public void onAlterKeyspace(String ksName)
+        public void onUpdateKeyspace(String ksName)
         {
             send(new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, ksName));
         }
 
-        public void onAlterTable(String ksName, String cfName, boolean affectsStatements)
+        public void onUpdateColumnFamily(String ksName, String cfName, boolean affectsStatements)
         {
             send(new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, Event.SchemaChange.Target.TABLE, ksName, cfName));
         }
 
-        public void onAlterType(String ksName, String typeName)
+        public void onUpdateUserType(String ksName, String typeName)
         {
             send(new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, Event.SchemaChange.Target.TYPE, ksName, typeName));
         }
 
-        public void onAlterFunction(String ksName, String functionName, List<AbstractType<?>> argTypes)
+        public void onUpdateFunction(String ksName, String functionName, List<AbstractType<?>> argTypes)
         {
             send(new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, Event.SchemaChange.Target.FUNCTION,
                                         ksName, functionName, AbstractType.asCQLTypeStringList(argTypes)));
         }
 
-        public void onAlterAggregate(String ksName, String aggregateName, List<AbstractType<?>> argTypes)
+        public void onUpdateAggregate(String ksName, String aggregateName, List<AbstractType<?>> argTypes)
         {
             send(new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, Event.SchemaChange.Target.AGGREGATE,
                                         ksName, aggregateName, AbstractType.asCQLTypeStringList(argTypes)));
@@ -640,12 +632,12 @@ public class Server implements CassandraDaemon.Server
             send(new Event.SchemaChange(Event.SchemaChange.Change.DROPPED, ksName));
         }
 
-        public void onDropTable(String ksName, String cfName)
+        public void onDropColumnFamily(String ksName, String cfName)
         {
             send(new Event.SchemaChange(Event.SchemaChange.Change.DROPPED, Event.SchemaChange.Target.TABLE, ksName, cfName));
         }
 
-        public void onDropType(String ksName, String typeName)
+        public void onDropUserType(String ksName, String typeName)
         {
             send(new Event.SchemaChange(Event.SchemaChange.Change.DROPPED, Event.SchemaChange.Target.TYPE, ksName, typeName));
         }

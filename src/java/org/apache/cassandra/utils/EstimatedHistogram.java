@@ -65,18 +65,6 @@ public class EstimatedHistogram
         buckets = new AtomicLongArray(bucketOffsets.length + 1);
     }
 
-    /**
-     * Create EstimatedHistogram from only bucket data.
-     *
-     * @param bucketData bucket data
-     */
-    public EstimatedHistogram(long[] bucketData)
-    {
-        assert bucketData != null && bucketData.length > 0 : "Bucket data must be an array of size more than 0";
-        bucketOffsets = newOffsets(bucketData.length - 1, false);
-        buckets = new AtomicLongArray(bucketData);
-    }
-
     public EstimatedHistogram(long[] offsets, long[] bucketData)
     {
         assert bucketData.length == offsets.length +1;
@@ -84,7 +72,7 @@ public class EstimatedHistogram
         buckets = new AtomicLongArray(bucketData);
     }
 
-    public static long[] newOffsets(int size, boolean considerZeroes)
+    private static long[] newOffsets(int size, boolean considerZeroes)
     {
         long[] result = new long[size + (considerZeroes ? 1 : 0)];
         int i = 0;
@@ -254,14 +242,6 @@ public class EstimatedHistogram
     }
 
     /**
-     * @return the largest bucket offset
-     */
-    public long getLargestBucketOffset()
-    {
-        return bucketOffsets[bucketOffsets.length - 1];
-    }
-
-    /**
      * @return true if this histogram has overflowed -- that is, a value larger than our largest bucket could bound was added
      */
     public boolean isOverflowed()
@@ -372,8 +352,7 @@ public class EstimatedHistogram
             long[] offsets = new long[size - 1];
             long[] buckets = new long[size];
 
-            for (int i = 0; i < size; i++)
-            {
+            for (int i = 0; i < size; i++) {
                 offsets[i == 0 ? 0 : i - 1] = in.readLong();
                 buckets[i] = in.readLong();
             }

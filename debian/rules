@@ -40,10 +40,12 @@ install: build
 	dh_testroot
 	dh_installdirs
 	dh_install
-	dh_python2
+	dh_pysupport
 
 	# Copy in the jar and symlink to something stable
 	dh_install build/apache-cassandra-$(VERSION).jar \
+		usr/share/cassandra
+	dh_install build/apache-cassandra-thrift-$(VERSION).jar \
 		usr/share/cassandra
 
 	# Copy stress jars

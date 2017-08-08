@@ -35,14 +35,12 @@ public abstract class AbstractPaxosCallback<T> implements IAsyncCallback<T>
     protected final CountDownLatch latch;
     protected final int targets;
     private final ConsistencyLevel consistency;
-    private final long queryStartNanoTime;
 
-    public AbstractPaxosCallback(int targets, ConsistencyLevel consistency, long queryStartNanoTime)
+    public AbstractPaxosCallback(int targets, ConsistencyLevel consistency)
     {
         this.targets = targets;
         this.consistency = consistency;
         latch = new CountDownLatch(targets);
-        this.queryStartNanoTime = queryStartNanoTime;
     }
 
     public boolean isLatencyForSnitch()
@@ -59,8 +57,7 @@ public abstract class AbstractPaxosCallback<T> implements IAsyncCallback<T>
     {
         try
         {
-            long timeout = TimeUnit.MILLISECONDS.toNanos(DatabaseDescriptor.getWriteRpcTimeout()) - (System.nanoTime() - queryStartNanoTime);
-            if (!latch.await(timeout, TimeUnit.NANOSECONDS))
+            if (!latch.await(DatabaseDescriptor.getWriteRpcTimeout(), TimeUnit.MILLISECONDS))
                 throw new WriteTimeoutException(WriteType.CAS, consistency, getResponseCount(), targets);
         }
         catch (InterruptedException ex)

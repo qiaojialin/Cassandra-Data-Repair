@@ -20,18 +20,19 @@ package org.apache.cassandra.db.rows;
 import java.nio.ByteBuffer;
 import java.util.*;
 
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.utils.memory.AbstractAllocator;
 
 /**
  * A marker for a range tombstone bound.
  * <p>
- * There is 2 types of markers: bounds (see {@link RangeTombstoneBoundMarker}) and boundaries (see {@link RangeTombstoneBoundaryMarker}).
+ * There is 2 types of markers: bounds (see {@link RangeTombstoneBound}) and boundaries (see {@link RangeTombstoneBoundary}).
  */
 public interface RangeTombstoneMarker extends Unfiltered
 {
     @Override
-    public ClusteringBoundOrBoundary clustering();
+    public RangeTombstone.Bound clustering();
 
     public boolean isBoundary();
 
@@ -43,18 +44,10 @@ public interface RangeTombstoneMarker extends Unfiltered
     public boolean openIsInclusive(boolean reversed);
     public boolean closeIsInclusive(boolean reversed);
 
-    public ClusteringBound openBound(boolean reversed);
-    public ClusteringBound closeBound(boolean reversed);
+    public RangeTombstone.Bound openBound(boolean reversed);
+    public RangeTombstone.Bound closeBound(boolean reversed);
 
     public RangeTombstoneMarker copy(AbstractAllocator allocator);
-
-    default public boolean isEmpty()
-    {
-        // There is no such thing as an empty marker
-        return false;
-    }
-
-    public RangeTombstoneMarker withNewOpeningDeletionTime(boolean reversed, DeletionTime newDeletionTime);
 
     /**
      * Utility class to help merging range tombstone markers coming from multiple inputs (UnfilteredRowIterators).
@@ -74,7 +67,7 @@ public interface RangeTombstoneMarker extends Unfiltered
         private final DeletionTime partitionDeletion;
         private final boolean reversed;
 
-        private ClusteringBoundOrBoundary bound;
+        private RangeTombstone.Bound bound;
         private final RangeTombstoneMarker[] markers;
 
         // For each iterator, what is the currently open marker deletion time (or null if there is no open marker on that iterator)

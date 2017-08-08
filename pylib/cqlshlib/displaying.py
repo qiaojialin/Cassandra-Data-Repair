@@ -113,7 +113,6 @@ DEFAULT_VALUE_COLORS = dict(
     inet=GREEN,
     boolean=GREEN,
     uuid=GREEN,
-    duration=GREEN,
     collection=BLUE,
     reset=ANSI_RESET,
 )

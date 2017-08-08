@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.cassandra.metrics.SEPMetrics;
@@ -29,12 +30,11 @@ import org.apache.cassandra.utils.concurrent.WaitQueue;
 
 import static org.apache.cassandra.concurrent.SEPWorker.Work;
 
-public class SEPExecutor extends AbstractLocalAwareExecutorService
+public class SEPExecutor extends AbstractTracingAwareExecutorService
 {
     private final SharedExecutorPool pool;
 
     public final int maxWorkers;
-    public final String name;
     private final int maxTasksQueued;
     private final SEPMetrics metrics;
 
@@ -56,7 +56,6 @@ public class SEPExecutor extends AbstractLocalAwareExecutorService
     SEPExecutor(SharedExecutorPool pool, int maxWorkers, int maxTasksQueued, String jmxPath, String name)
     {
         this.pool = pool;
-        this.name = name;
         this.maxWorkers = maxWorkers;
         this.maxTasksQueued = maxTasksQueued;
         this.permits.set(combine(0, maxWorkers));

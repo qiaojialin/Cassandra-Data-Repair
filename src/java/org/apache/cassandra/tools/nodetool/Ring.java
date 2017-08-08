@@ -72,7 +72,7 @@ public class Ring extends NodeToolCmd
         String formatPlaceholder = "%%-%ds  %%-12s%%-7s%%-8s%%-16s%%-20s%%-44s%%n";
         String format = format(formatPlaceholder, maxAddressLength);
 
-        StringBuilder errors = new StringBuilder();
+        StringBuffer errors = new StringBuffer();
         boolean showEffectiveOwnership = true;
         // Calculate per-token ownership of the ring
         Map<InetAddress, Float> ownerships;
@@ -83,12 +83,12 @@ public class Ring extends NodeToolCmd
         catch (IllegalStateException ex)
         {
             ownerships = probe.getOwnership();
-            errors.append("Note: ").append(ex.getMessage()).append("%n");
+            errors.append("Note: " + ex.getMessage() + "%n");
             showEffectiveOwnership = false;
         }
         catch (IllegalArgumentException ex)
         {
-            System.out.printf("%nError: %s%n", ex.getMessage());
+            System.out.printf("%nError: " + ex.getMessage() + "%n");
             return;
         }
 
