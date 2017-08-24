@@ -19,16 +19,12 @@ package org.apache.cassandra.repair.messages;
 
 import java.io.IOException;
 import java.net.InetAddress;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
 
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.repair.NodePair;
 import org.apache.cassandra.repair.RepairJobDesc;
-import org.apache.cassandra.streaming.SessionSummary;
 
 /**
  *
@@ -43,41 +39,18 @@ public class SyncComplete extends RepairMessage
     /** true if sync success, false otherwise */
     public final boolean success;
 
-    public final List<SessionSummary> summaries;
-
-    public SyncComplete(RepairJobDesc desc, NodePair nodes, boolean success, List<SessionSummary> summaries)
+    public SyncComplete(RepairJobDesc desc, NodePair nodes, boolean success)
     {
         super(Type.SYNC_COMPLETE, desc);
         this.nodes = nodes;
         this.success = success;
-        this.summaries = summaries;
     }
 
-    public SyncComplete(RepairJobDesc desc, InetAddress endpoint1, InetAddress endpoint2, boolean success, List<SessionSummary> summaries)
+    public SyncComplete(RepairJobDesc desc, InetAddress endpoint1, InetAddress endpoint2, boolean success)
     {
         super(Type.SYNC_COMPLETE, desc);
-        this.summaries = summaries;
         this.nodes = new NodePair(endpoint1, endpoint2);
         this.success = success;
-    }
-
-    @Override
-    public boolean equals(Object o)
-    {
-        if (!(o instanceof SyncComplete))
-            return false;
-        SyncComplete other = (SyncComplete)o;
-        return messageType == other.messageType &&
-               desc.equals(other.desc) &&
-               success == other.success &&
-               nodes.equals(other.nodes) &&
-               summaries.equals(other.summaries);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(messageType, desc, success, nodes, summaries);
     }
 
     private static class SyncCompleteSerializer implements MessageSerializer<SyncComplete>
@@ -87,28 +60,13 @@ public class SyncComplete extends RepairMessage
             RepairJobDesc.serializer.serialize(message.desc, out, version);
             NodePair.serializer.serialize(message.nodes, out, version);
             out.writeBoolean(message.success);
-
-            out.writeInt(message.summaries.size());
-            for (SessionSummary summary: message.summaries)
-            {
-                SessionSummary.serializer.serialize(summary, out, version);
-            }
         }
 
         public SyncComplete deserialize(DataInputPlus in, int version) throws IOException
         {
             RepairJobDesc desc = RepairJobDesc.serializer.deserialize(in, version);
             NodePair nodes = NodePair.serializer.deserialize(in, version);
-            boolean success = in.readBoolean();
-
-            int numSummaries = in.readInt();
-            List<SessionSummary> summaries = new ArrayList<>(numSummaries);
-            for (int i=0; i<numSummaries; i++)
-            {
-                summaries.add(SessionSummary.serializer.deserialize(in, version));
-            }
-
-            return new SyncComplete(desc, nodes, success, summaries);
+            return new SyncComplete(desc, nodes, in.readBoolean());
         }
 
         public long serializedSize(SyncComplete message, int version)
@@ -116,13 +74,6 @@ public class SyncComplete extends RepairMessage
             long size = RepairJobDesc.serializer.serializedSize(message.desc, version);
             size += NodePair.serializer.serializedSize(message.nodes, version);
             size += TypeSizes.sizeof(message.success);
-
-            size += TypeSizes.sizeof(message.summaries.size());
-            for (SessionSummary summary: message.summaries)
-            {
-                size += SessionSummary.serializer.serializedSize(summary, version);
-            }
-
             return size;
         }
     }

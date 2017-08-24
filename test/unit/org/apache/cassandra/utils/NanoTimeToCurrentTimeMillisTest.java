@@ -34,18 +34,21 @@ public class NanoTimeToCurrentTimeMillisTest
             now = Math.max(now, System.currentTimeMillis());
             if (ii % 10000 == 0)
             {
-                NanoTimeToCurrentTimeMillis.updateNow();
+                synchronized (NanoTimeToCurrentTimeMillis.TIMESTAMP_UPDATE)
+                {
+                    NanoTimeToCurrentTimeMillis.TIMESTAMP_UPDATE.notify();
+                }
                 Thread.sleep(1);
             }
 
             nowNanos = Math.max(nowNanos, System.nanoTime());
             long convertedNow = NanoTimeToCurrentTimeMillis.convert(nowNanos);
 
-            int maxDiff = FBUtilities.isWindows ? 15 : 1;
+            int maxDiff = FBUtilities.isWindows()? 15 : 1;
             assertTrue("convertedNow = " + convertedNow + " lastConverted = " + lastConverted + " in iteration " + ii,
                        convertedNow >= (lastConverted - maxDiff));
 
-            maxDiff = FBUtilities.isWindows ? 25 : 2;
+            maxDiff = FBUtilities.isWindows()? 25 : 2;
             assertTrue("now = " + now + " convertedNow = " + convertedNow + " in iteration " + ii,
                        (maxDiff - 2) <= convertedNow);
 

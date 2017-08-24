@@ -30,9 +30,8 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import org.apache.cassandra.cql3.ColumnIdentifier;
-import org.apache.cassandra.schema.Indexes;
-import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.config.Config.DiskFailurePolicy;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.statements.IndexTarget;
@@ -42,10 +41,9 @@ import org.apache.cassandra.index.internal.CassandraIndex;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.schema.IndexMetadata;
-import org.apache.cassandra.service.DefaultFSErrorHandler;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Pair;
 
 import static org.junit.Assert.assertEquals;
@@ -60,23 +58,21 @@ public class DirectoriesTest
     private static final String KS = "ks";
     private static final String[] TABLES = new String[] { "cf1", "ks" };
 
-    private static final Set<TableMetadata> CFM = new HashSet<>(TABLES.length);
+    private static final Set<CFMetaData> CFM = new HashSet<>(TABLES.length);
 
     private static final Map<String, List<File>> files = new HashMap<>();
 
     @BeforeClass
     public static void beforeClass() throws IOException
     {
-        DatabaseDescriptor.daemonInitialization();
-
-        FileUtils.setFSErrorHandler(new DefaultFSErrorHandler());
-
         for (String table : TABLES)
         {
-            CFM.add(TableMetadata.builder(KS, table)
-                                 .addPartitionKeyColumn("thekey", UTF8Type.instance)
-                                 .addClusteringColumn("thecolumn", UTF8Type.instance)
-                                 .build());
+            UUID tableID = CFMetaData.generateLegacyCfId(KS, table);
+            CFM.add(CFMetaData.Builder.create(KS, table)
+                                      .withId(tableID)
+                                      .addPartitionKey("thekey", UTF8Type.instance)
+                                      .addClusteringColumn("thecolumn", UTF8Type.instance)
+                                      .build());
         }
 
         tempDataDir = File.createTempFile("cassandra", "unittest");
@@ -97,29 +93,29 @@ public class DirectoriesTest
 
     private static void createTestFiles() throws IOException
     {
-        for (TableMetadata cfm : CFM)
+        for (CFMetaData cfm : CFM)
         {
             List<File> fs = new ArrayList<>();
-            files.put(cfm.name, fs);
+            files.put(cfm.cfName, fs);
             File dir = cfDir(cfm);
             dir.mkdirs();
 
-            createFakeSSTable(dir, cfm.name, 1, fs);
-            createFakeSSTable(dir, cfm.name, 2, fs);
+            createFakeSSTable(dir, cfm.cfName, 1, fs);
+            createFakeSSTable(dir, cfm.cfName, 2, fs);
 
             File backupDir = new File(dir, Directories.BACKUPS_SUBDIR);
             backupDir.mkdir();
-            createFakeSSTable(backupDir, cfm.name, 1, fs);
+            createFakeSSTable(backupDir, cfm.cfName, 1, fs);
 
             File snapshotDir = new File(dir, Directories.SNAPSHOT_SUBDIR + File.separator + "42");
             snapshotDir.mkdirs();
-            createFakeSSTable(snapshotDir, cfm.name, 1, fs);
+            createFakeSSTable(snapshotDir, cfm.cfName, 1, fs);
         }
     }
 
     private static void createFakeSSTable(File dir, String cf, int gen, List<File> addTo) throws IOException
     {
-        Descriptor desc = new Descriptor(dir, KS, cf, gen, SSTableFormat.Type.BIG);
+        Descriptor desc = new Descriptor(dir, KS, cf, gen);
         for (Component c : new Component[]{ Component.DATA, Component.PRIMARY_INDEX, Component.FILTER })
         {
             File f = new File(desc.filenameFor(c));
@@ -128,60 +124,59 @@ public class DirectoriesTest
         }
     }
 
-    private static File cfDir(TableMetadata metadata)
+    private static File cfDir(CFMetaData metadata)
     {
-        String tableId = metadata.id.toHexString();
-        int idx = metadata.name.indexOf(Directories.SECONDARY_INDEX_NAME_SEPARATOR);
+        String cfId = ByteBufferUtil.bytesToHex(ByteBufferUtil.bytes(metadata.cfId));
+        int idx = metadata.cfName.indexOf(Directories.SECONDARY_INDEX_NAME_SEPARATOR);
         if (idx >= 0)
         {
             // secondary index
             return new File(tempDataDir,
-                            metadata.keyspace + File.separator +
-                            metadata.name.substring(0, idx) + '-' + tableId + File.separator +
-                            metadata.name.substring(idx));
+                            metadata.ksName + File.separator +
+                            metadata.cfName.substring(0, idx) + '-' + cfId + File.separator +
+                            metadata.cfName.substring(idx));
         }
         else
         {
-            return new File(tempDataDir, metadata.keyspace + File.separator + metadata.name + '-' + tableId);
+            return new File(tempDataDir, metadata.ksName + File.separator + metadata.cfName + '-' + cfId);
         }
     }
 
     @Test
-    public void testStandardDirs() throws IOException
+    public void testStandardDirs()
     {
-        for (TableMetadata cfm : CFM)
+        for (CFMetaData cfm : CFM)
         {
             Directories directories = new Directories(cfm);
             assertEquals(cfDir(cfm), directories.getDirectoryForNewSSTables());
 
-            Descriptor desc = new Descriptor(cfDir(cfm), KS, cfm.name, 1, SSTableFormat.Type.BIG);
+            Descriptor desc = new Descriptor(cfDir(cfm), KS, cfm.cfName, 1);
             File snapshotDir = new File(cfDir(cfm),  File.separator + Directories.SNAPSHOT_SUBDIR + File.separator + "42");
-            assertEquals(snapshotDir.getCanonicalFile(), Directories.getSnapshotDirectory(desc, "42"));
+            assertEquals(snapshotDir, Directories.getSnapshotDirectory(desc, "42"));
 
             File backupsDir = new File(cfDir(cfm),  File.separator + Directories.BACKUPS_SUBDIR);
-            assertEquals(backupsDir.getCanonicalFile(), Directories.getBackupsDirectory(desc));
+            assertEquals(backupsDir, Directories.getBackupsDirectory(desc));
         }
     }
 
     @Test
     public void testSecondaryIndexDirectories()
     {
-        TableMetadata.Builder builder =
-            TableMetadata.builder(KS, "cf")
-                         .addPartitionKeyColumn("thekey", UTF8Type.instance)
-                         .addClusteringColumn("col", UTF8Type.instance);
-
-        ColumnIdentifier col = ColumnIdentifier.getInterned("col", true);
+        UUID tableID = CFMetaData.generateLegacyCfId(KS, "cf");
+        CFMetaData PARENT_CFM = CFMetaData.Builder.create(KS, "cf")
+                                  .withId(tableID)
+                                  .addPartitionKey("thekey", UTF8Type.instance)
+                                  .addClusteringColumn("col", UTF8Type.instance)
+                                  .build();
+        ColumnDefinition col = PARENT_CFM.getColumnDefinition(ByteBufferUtil.bytes("col"));
         IndexMetadata indexDef =
-            IndexMetadata.fromIndexTargets(
-            Collections.singletonList(new IndexTarget(col, IndexTarget.Type.VALUES)),
+            IndexMetadata.fromIndexTargets(PARENT_CFM,
+                                           Collections.singletonList(new IndexTarget(col.name, IndexTarget.Type.VALUES)),
                                            "idx",
                                            IndexMetadata.Kind.KEYS,
                                            Collections.emptyMap());
-        builder.indexes(Indexes.of(indexDef));
-
-        TableMetadata PARENT_CFM = builder.build();
-        TableMetadata INDEX_CFM = CassandraIndex.indexCfsMetadata(PARENT_CFM, indexDef);
+        PARENT_CFM.indexes(PARENT_CFM.getIndexes().with(indexDef));
+        CFMetaData INDEX_CFM = CassandraIndex.indexCfsMetadata(PARENT_CFM, indexDef);
         Directories parentDirectories = new Directories(PARENT_CFM);
         Directories indexDirectories = new Directories(INDEX_CFM);
         // secondary index has its own directory
@@ -189,8 +184,8 @@ public class DirectoriesTest
         {
             assertEquals(cfDir(INDEX_CFM), dir);
         }
-        Descriptor parentDesc = new Descriptor(parentDirectories.getDirectoryForNewSSTables(), KS, PARENT_CFM.name, 0, SSTableFormat.Type.BIG);
-        Descriptor indexDesc = new Descriptor(indexDirectories.getDirectoryForNewSSTables(), KS, INDEX_CFM.name, 0, SSTableFormat.Type.BIG);
+        Descriptor parentDesc = new Descriptor(parentDirectories.getDirectoryForNewSSTables(), KS, PARENT_CFM.cfName, 0);
+        Descriptor indexDesc = new Descriptor(indexDirectories.getDirectoryForNewSSTables(), KS, INDEX_CFM.cfName, 0);
 
         // snapshot dir should be created under its parent's
         File parentSnapshotDirectory = Directories.getSnapshotDirectory(parentDesc, "test");
@@ -207,9 +202,9 @@ public class DirectoriesTest
                      indexDirectories.snapshotCreationTime("test"));
 
         // check true snapshot size
-        Descriptor parentSnapshot = new Descriptor(parentSnapshotDirectory, KS, PARENT_CFM.name, 0, SSTableFormat.Type.BIG);
+        Descriptor parentSnapshot = new Descriptor(parentSnapshotDirectory, KS, PARENT_CFM.cfName, 0);
         createFile(parentSnapshot.filenameFor(Component.DATA), 30);
-        Descriptor indexSnapshot = new Descriptor(indexSnapshotDirectory, KS, INDEX_CFM.name, 0, SSTableFormat.Type.BIG);
+        Descriptor indexSnapshot = new Descriptor(indexSnapshotDirectory, KS, INDEX_CFM.cfName, 0);
         createFile(indexSnapshot.filenameFor(Component.DATA), 40);
 
         assertEquals(30, parentDirectories.trueSnapshotsSize());
@@ -245,79 +240,49 @@ public class DirectoriesTest
     @Test
     public void testSSTableLister()
     {
-        for (TableMetadata cfm : CFM)
+        for (CFMetaData cfm : CFM)
         {
             Directories directories = new Directories(cfm);
-            checkFiles(cfm, directories);
+            Directories.SSTableLister lister;
+            Set<File> listed;
+
+            // List all but no snapshot, backup
+            lister = directories.sstableLister(Directories.OnTxnErr.THROW);
+            listed = new HashSet<>(lister.listFiles());
+            for (File f : files.get(cfm.cfName))
+            {
+                if (f.getPath().contains(Directories.SNAPSHOT_SUBDIR) || f.getPath().contains(Directories.BACKUPS_SUBDIR))
+                    assert !listed.contains(f) : f + " should not be listed";
+                else
+                    assert listed.contains(f) : f + " is missing";
+            }
+
+            // List all but including backup (but no snapshot)
+            lister = directories.sstableLister(Directories.OnTxnErr.THROW).includeBackups(true);
+            listed = new HashSet<>(lister.listFiles());
+            for (File f : files.get(cfm.cfName))
+            {
+                if (f.getPath().contains(Directories.SNAPSHOT_SUBDIR))
+                    assert !listed.contains(f) : f + " should not be listed";
+                else
+                    assert listed.contains(f) : f + " is missing";
+            }
+
+            // Skip temporary and compacted
+            lister = directories.sstableLister(Directories.OnTxnErr.THROW).skipTemporary(true);
+            listed = new HashSet<>(lister.listFiles());
+            for (File f : files.get(cfm.cfName))
+            {
+                if (f.getPath().contains(Directories.SNAPSHOT_SUBDIR) || f.getPath().contains(Directories.BACKUPS_SUBDIR))
+                    assert !listed.contains(f) : f + " should not be listed";
+                else if (f.getName().contains("tmp-"))
+                    assert !listed.contains(f) : f + " should not be listed";
+                else
+                    assert listed.contains(f) : f + " is missing";
+            }
         }
     }
 
-    private void checkFiles(TableMetadata cfm, Directories directories)
-    {
-        Directories.SSTableLister lister;
-        Set<File> listed;// List all but no snapshot, backup
-        lister = directories.sstableLister(Directories.OnTxnErr.THROW);
-        listed = new HashSet<>(lister.listFiles());
-        for (File f : files.get(cfm.name))
-        {
-            if (f.getPath().contains(Directories.SNAPSHOT_SUBDIR) || f.getPath().contains(Directories.BACKUPS_SUBDIR))
-                assertFalse(f + " should not be listed", listed.contains(f));
-            else
-                assertTrue(f + " is missing", listed.contains(f));
-        }
-
-        // List all but including backup (but no snapshot)
-        lister = directories.sstableLister(Directories.OnTxnErr.THROW).includeBackups(true);
-        listed = new HashSet<>(lister.listFiles());
-        for (File f : files.get(cfm.name))
-        {
-            if (f.getPath().contains(Directories.SNAPSHOT_SUBDIR))
-                assertFalse(f + " should not be listed", listed.contains(f));
-            else
-                assertTrue(f + " is missing", listed.contains(f));
-        }
-
-        // Skip temporary and compacted
-        lister = directories.sstableLister(Directories.OnTxnErr.THROW).skipTemporary(true);
-        listed = new HashSet<>(lister.listFiles());
-        for (File f : files.get(cfm.name))
-        {
-            if (f.getPath().contains(Directories.SNAPSHOT_SUBDIR) || f.getPath().contains(Directories.BACKUPS_SUBDIR))
-                assertFalse(f + " should not be listed", listed.contains(f));
-            else if (f.getName().contains("tmp-"))
-                assertFalse(f + " should not be listed", listed.contains(f));
-            else
-                assertTrue(f + " is missing", listed.contains(f));
-        }
-    }
-
-    @Test
-    public void testTemporaryFile() throws IOException
-    {
-        for (TableMetadata cfm : CFM)
-        {
-            Directories directories = new Directories(cfm);
-
-            File tempDir = directories.getTemporaryWriteableDirectoryAsFile(10);
-            tempDir.mkdir();
-            File tempFile = new File(tempDir, "tempFile");
-            tempFile.createNewFile();
-
-            assertTrue(tempDir.exists());
-            assertTrue(tempFile.exists());
-
-            //make sure temp dir/file will not affect existing sstable listing
-            checkFiles(cfm, directories);
-
-            directories.removeTemporaryDirectories();
-
-            //make sure temp dir/file deletion will not affect existing sstable listing
-            checkFiles(cfm, directories);
-
-            assertFalse(tempDir.exists());
-            assertFalse(tempFile.exists());
-        }
-    }
 
     @Test
     public void testDiskFailurePolicy_best_effort()
@@ -350,14 +315,14 @@ public class DirectoriesTest
     @Test
     public void testMTSnapshots() throws Exception
     {
-        for (final TableMetadata cfm : CFM)
+        for (final CFMetaData cfm : CFM)
         {
             final Directories directories = new Directories(cfm);
             assertEquals(cfDir(cfm), directories.getDirectoryForNewSSTables());
             final String n = Long.toString(System.nanoTime());
             Callable<File> directoryGetter = new Callable<File>() {
                 public File call() throws Exception {
-                    Descriptor desc = new Descriptor(cfDir(cfm), KS, cfm.name, 1, SSTableFormat.Type.BIG);
+                    Descriptor desc = new Descriptor(cfDir(cfm), KS, cfm.cfName, 1);
                     return Directories.getSnapshotDirectory(desc, n);
                 }
             };

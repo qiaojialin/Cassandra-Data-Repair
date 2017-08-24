@@ -35,7 +35,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.filter.RowFilter;
@@ -96,7 +96,7 @@ public class CleanupTest
         assertEquals(LOOPS, Iterators.size(iter));
 
         // with one token in the ring, owned by the local node, cleanup should be a no-op
-        CompactionManager.instance.performCleanup(cfs, 2);
+        CompactionManager.instance.performCleanup(cfs);
 
         // ensure max timestamp of the sstables are retained post-cleanup
         assert expectedMaxTimestamps.equals(getMaxTimestampList(cfs));
@@ -118,7 +118,7 @@ public class CleanupTest
         fillCF(cfs, "birthdate", LOOPS);
         assertEquals(LOOPS, Util.getAll(Util.cmd(cfs).build()).size());
 
-        ColumnMetadata cdef = cfs.metadata().getColumn(COLUMN);
+        ColumnDefinition cdef = cfs.metadata.getColumnDefinition(COLUMN);
         String indexName = "birthdate_key_index";
         long start = System.nanoTime();
         while (!cfs.getBuiltIndexes().contains(indexName) && System.nanoTime() - start < TimeUnit.SECONDS.toNanos(10))
@@ -137,7 +137,7 @@ public class CleanupTest
         tmd.updateNormalToken(new BytesToken(tk1), InetAddress.getByName("127.0.0.1"));
         tmd.updateNormalToken(new BytesToken(tk2), InetAddress.getByName("127.0.0.2"));
 
-        CompactionManager.instance.performCleanup(cfs, 2);
+        CompactionManager.instance.performCleanup(cfs);
 
         // row data should be gone
         assertEquals(0, Util.getAll(Util.cmd(cfs).build()).size());
@@ -168,33 +168,7 @@ public class CleanupTest
         tk2[0] = 1;
         tmd.updateNormalToken(new BytesToken(tk1), InetAddress.getByName("127.0.0.1"));
         tmd.updateNormalToken(new BytesToken(tk2), InetAddress.getByName("127.0.0.2"));
-        CompactionManager.instance.performCleanup(cfs, 2);
-
-        assertEquals(0, Util.getAll(Util.cmd(cfs).build()).size());
-    }
-
-    @Test
-    public void testuserDefinedCleanupWithNewToken() throws ExecutionException, InterruptedException, UnknownHostException
-    {
-        StorageService.instance.getTokenMetadata().clearUnsafe();
-
-        Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
-
-        // insert data and verify we get it back w/ range query
-        fillCF(cfs, "val", LOOPS);
-
-        assertEquals(LOOPS, Util.getAll(Util.cmd(cfs).build()).size());
-        TokenMetadata tmd = StorageService.instance.getTokenMetadata();
-
-        byte[] tk1 = new byte[1], tk2 = new byte[1];
-        tk1[0] = 2;
-        tk2[0] = 1;
-        tmd.updateNormalToken(new BytesToken(tk1), InetAddress.getByName("127.0.0.1"));
-        tmd.updateNormalToken(new BytesToken(tk2), InetAddress.getByName("127.0.0.2"));
-
-        for(SSTableReader r: cfs.getLiveSSTables())
-            CompactionManager.instance.forceUserDefinedCleanup(r.getFilename());
+        CompactionManager.instance.performCleanup(cfs);
 
         assertEquals(0, Util.getAll(Util.cmd(cfs).build()).size());
     }
@@ -279,7 +253,7 @@ public class CleanupTest
         {
             String key = String.valueOf(i);
             // create a row and update the birthdate value, test that the index query fetches the new version
-            new RowUpdateBuilder(cfs.metadata(), System.currentTimeMillis(), ByteBufferUtil.bytes(key))
+            new RowUpdateBuilder(cfs.metadata, System.currentTimeMillis(), ByteBufferUtil.bytes(key))
                     .clustering(COLUMN)
                     .add(colName, VALUE)
                     .build()

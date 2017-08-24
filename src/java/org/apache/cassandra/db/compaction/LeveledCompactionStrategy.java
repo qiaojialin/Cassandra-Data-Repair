@@ -28,8 +28,7 @@ import com.google.common.primitives.Doubles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.config.Config;
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
@@ -38,54 +37,41 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.codehaus.jackson.JsonNode;
-import org.codehaus.jackson.node.JsonNodeFactory;
-import org.codehaus.jackson.node.ObjectNode;
+import org.apache.cassandra.utils.FBUtilities;
 
 public class LeveledCompactionStrategy extends AbstractCompactionStrategy
 {
     private static final Logger logger = LoggerFactory.getLogger(LeveledCompactionStrategy.class);
     private static final String SSTABLE_SIZE_OPTION = "sstable_size_in_mb";
-    private static final boolean tolerateSstableSize = Boolean.getBoolean(Config.PROPERTY_PREFIX + "tolerate_sstable_size");
-    private static final String LEVEL_FANOUT_SIZE_OPTION = "fanout_size";
-    public static final int DEFAULT_LEVEL_FANOUT_SIZE = 10;
 
     @VisibleForTesting
     final LeveledManifest manifest;
     private final int maxSSTableSizeInMB;
-    private final int levelFanoutSize;
 
     public LeveledCompactionStrategy(ColumnFamilyStore cfs, Map<String, String> options)
     {
         super(cfs, options);
         int configuredMaxSSTableSize = 160;
-        int configuredLevelFanoutSize = DEFAULT_LEVEL_FANOUT_SIZE;
         SizeTieredCompactionStrategyOptions localOptions = new SizeTieredCompactionStrategyOptions(options);
         if (options != null)
-        {
-            if (options.containsKey(SSTABLE_SIZE_OPTION))
-            {
-                configuredMaxSSTableSize = Integer.parseInt(options.get(SSTABLE_SIZE_OPTION));
-                if (!tolerateSstableSize)
-                {
+        {             
+            if (options.containsKey(SSTABLE_SIZE_OPTION))             
+            {                 
+                configuredMaxSSTableSize = Integer.parseInt(options.get(SSTABLE_SIZE_OPTION));                 
+                if (!Boolean.getBoolean("cassandra.tolerate_sstable_size"))                 
+                {                     
                     if (configuredMaxSSTableSize >= 1000)
                         logger.warn("Max sstable size of {}MB is configured for {}.{}; having a unit of compaction this large is probably a bad idea",
-                                configuredMaxSSTableSize, cfs.name, cfs.getTableName());
-                    if (configuredMaxSSTableSize < 50)
+                                configuredMaxSSTableSize, cfs.name, cfs.getColumnFamilyName());
+                    if (configuredMaxSSTableSize < 50)  
                         logger.warn("Max sstable size of {}MB is configured for {}.{}.  Testing done for CASSANDRA-5727 indicates that performance improves up to 160MB",
-                                configuredMaxSSTableSize, cfs.name, cfs.getTableName());
+                                configuredMaxSSTableSize, cfs.name, cfs.getColumnFamilyName());
                 }
-            }
-
-            if (options.containsKey(LEVEL_FANOUT_SIZE_OPTION))
-            {
-                configuredLevelFanoutSize = Integer.parseInt(options.get(LEVEL_FANOUT_SIZE_OPTION));
             }
         }
         maxSSTableSizeInMB = configuredMaxSSTableSize;
-        levelFanoutSize = configuredLevelFanoutSize;
 
-        manifest = new LeveledManifest(cfs, this.maxSSTableSizeInMB, this.levelFanoutSize, localOptions);
+        manifest = new LeveledManifest(cfs, this.maxSSTableSizeInMB, localOptions);
         logger.trace("Created {}", manifest);
     }
 
@@ -99,19 +85,12 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
         return manifest.getAllLevelSize();
     }
 
-    @Override
-    public void startup()
-    {
-        manifest.calculateLastCompactedKeys();
-        super.startup();
-    }
-
     /**
      * the only difference between background and maximal in LCS is that maximal is still allowed
      * (by explicit user request) even when compaction is disabled.
      */
-    @SuppressWarnings("resource") // transaction is closed by AbstractCompactionTask::execute
-    public AbstractCompactionTask getNextBackgroundTask(int gcBefore)
+    @SuppressWarnings("resource")
+    public synchronized AbstractCompactionTask getNextBackgroundTask(int gcBefore)
     {
         while (true)
         {
@@ -146,7 +125,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
         }
     }
 
-    @SuppressWarnings("resource") // transaction is closed by AbstractCompactionTask::execute
+    @SuppressWarnings("resource")
     public synchronized Collection<AbstractCompactionTask> getMaximalTask(int gcBefore, boolean splitOutput)
     {
         Iterable<SSTableReader> sstables = manifest.getAllSSTables();
@@ -162,21 +141,9 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
     }
 
     @Override
-    @SuppressWarnings("resource") // transaction is closed by AbstractCompactionTask::execute
     public AbstractCompactionTask getUserDefinedTask(Collection<SSTableReader> sstables, int gcBefore)
     {
-
-        if (sstables.isEmpty())
-            return null;
-
-        LifecycleTransaction transaction = cfs.getTracker().tryModify(sstables, OperationType.COMPACTION);
-        if (transaction == null)
-        {
-            logger.trace("Unable to mark {} for compaction; probably a background compaction got to it first.  You can disable background compactions temporarily if this is a problem", sstables);
-            return null;
-        }
-        int level = sstables.size() > 1 ? 0 : sstables.iterator().next().getSSTableLevel();
-        return new LeveledCompactionTask(cfs, transaction, level, gcBefore, level == 0 ? Long.MAX_VALUE : getMaxSSTableBytes(), false);
+        throw new UnsupportedOperationException("LevelDB compaction strategy does not allow user-specified compactions");
     }
 
     @Override
@@ -210,13 +177,11 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
         for (SSTableReader sstable : ssTablesToGroup)
         {
             Integer level = sstable.getSSTableLevel();
-            Collection<SSTableReader> sstablesForLevel = sstablesByLevel.get(level);
-            if (sstablesForLevel == null)
+            if (!sstablesByLevel.containsKey(level))
             {
-                sstablesForLevel = new ArrayList<SSTableReader>();
-                sstablesByLevel.put(level, sstablesForLevel);
+                sstablesByLevel.put(level, new ArrayList<SSTableReader>());
             }
-            sstablesForLevel.add(sstable);
+            sstablesByLevel.get(level).add(sstable);
         }
 
         Collection<Collection<SSTableReader>> groupedSSTables = new ArrayList<>();
@@ -243,9 +208,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
 
     public int getEstimatedRemainingTasks()
     {
-        int n = manifest.getEstimatedTasks();
-        cfs.getCompactionStrategyManager().compactionLogger.pending(this, n);
-        return n;
+        return manifest.getEstimatedTasks();
     }
 
     public long getMaxSSTableBytes()
@@ -253,30 +216,12 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
         return maxSSTableSizeInMB * 1024L * 1024L;
     }
 
-    public int getLevelFanoutSize()
+    public ScannerList getScanners(Collection<SSTableReader> sstables, Range<Token> range)
     {
-        return levelFanoutSize;
-    }
-
-    public ScannerList getScanners(Collection<SSTableReader> sstables, Collection<Range<Token>> ranges)
-    {
-        Set<SSTableReader>[] sstablesPerLevel = manifest.getSStablesPerLevelSnapshot();
-
         Multimap<Integer, SSTableReader> byLevel = ArrayListMultimap.create();
         for (SSTableReader sstable : sstables)
         {
-            int level = sstable.getSSTableLevel();
-            // if an sstable is not on the manifest, it was recently added or removed
-            // so we add it to level -1 and create exclusive scanners for it - see below (#9935)
-            if (level >= sstablesPerLevel.length || !sstablesPerLevel[level].contains(sstable))
-            {
-                logger.warn("Live sstable {} from level {} is not on corresponding level in the leveled manifest." +
-                            " This is not a problem per se, but may indicate an orphaned sstable due to a failed" +
-                            " compaction not cleaned up properly.",
-                             sstable.getFilename(), level);
-                level = -1;
-            }
-            byLevel.get(level).add(sstable);
+            byLevel.get(sstable.getSSTableLevel()).add(sstable);
         }
 
         List<ISSTableScanner> scanners = new ArrayList<ISSTableScanner>(sstables.size());
@@ -290,16 +235,16 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
                 {
                     // L0 makes no guarantees about overlapping-ness.  Just create a direct scanner for each
                     for (SSTableReader sstable : byLevel.get(level))
-                        scanners.add(sstable.getScanner(ranges));
+                        scanners.add(sstable.getScanner(range, CompactionManager.instance.getRateLimiter()));
                 }
                 else
                 {
                     // Create a LeveledScanner that only opens one sstable at a time, in sorted order
-                    Collection<SSTableReader> intersecting = LeveledScanner.intersecting(byLevel.get(level), ranges);
+                    List<SSTableReader> intersecting = LeveledScanner.intersecting(byLevel.get(level), range);
                     if (!intersecting.isEmpty())
                     {
                         @SuppressWarnings("resource") // The ScannerList will be in charge of closing (and we close properly on errors)
-                        ISSTableScanner scanner = new LeveledScanner(cfs.metadata(), intersecting, ranges);
+                        ISSTableScanner scanner = new LeveledScanner(intersecting, range);
                         scanners.add(scanner);
                     }
                 }
@@ -339,80 +284,64 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
         manifest.remove(sstable);
     }
 
-    @Override
-    protected Set<SSTableReader> getSSTables()
-    {
-        return manifest.getSSTables();
-    }
-
     // Lazily creates SSTableBoundedScanner for sstable that are assumed to be from the
     // same level (e.g. non overlapping) - see #4142
     private static class LeveledScanner extends AbstractIterator<UnfilteredRowIterator> implements ISSTableScanner
     {
-        private final TableMetadata metadata;
-        private final Collection<Range<Token>> ranges;
+        private final Range<Token> range;
         private final List<SSTableReader> sstables;
         private final Iterator<SSTableReader> sstableIterator;
         private final long totalLength;
-        private final long compressedLength;
 
         private ISSTableScanner currentScanner;
         private long positionOffset;
-        private long totalBytesScanned = 0;
 
-        public LeveledScanner(TableMetadata metadata, Collection<SSTableReader> sstables, Collection<Range<Token>> ranges)
+        public LeveledScanner(Collection<SSTableReader> sstables, Range<Token> range)
         {
-            this.metadata = metadata;
-            this.ranges = ranges;
+            this.range = range;
 
             // add only sstables that intersect our range, and estimate how much data that involves
             this.sstables = new ArrayList<>(sstables.size());
             long length = 0;
-            long cLength = 0;
             for (SSTableReader sstable : sstables)
             {
                 this.sstables.add(sstable);
                 long estimatedKeys = sstable.estimatedKeys();
                 double estKeysInRangeRatio = 1.0;
 
-                if (estimatedKeys > 0 && ranges != null)
-                    estKeysInRangeRatio = ((double) sstable.estimatedKeysForRanges(ranges)) / estimatedKeys;
+                if (estimatedKeys > 0 && range != null)
+                    estKeysInRangeRatio = ((double) sstable.estimatedKeysForRanges(Collections.singleton(range))) / estimatedKeys;
 
                 length += sstable.uncompressedLength() * estKeysInRangeRatio;
-                cLength += sstable.onDiskLength() * estKeysInRangeRatio;
             }
 
             totalLength = length;
-            compressedLength = cLength;
             Collections.sort(this.sstables, SSTableReader.sstableComparator);
             sstableIterator = this.sstables.iterator();
             assert sstableIterator.hasNext(); // caller should check intersecting first
-            SSTableReader currentSSTable = sstableIterator.next();
-            currentScanner = currentSSTable.getScanner(ranges);
-
+            currentScanner = sstableIterator.next().getScanner(range, CompactionManager.instance.getRateLimiter());
         }
 
-        public static Collection<SSTableReader> intersecting(Collection<SSTableReader> sstables, Collection<Range<Token>> ranges)
+        public static List<SSTableReader> intersecting(Collection<SSTableReader> sstables, Range<Token> range)
         {
-            if (ranges == null)
-                return Lists.newArrayList(sstables);
-
-            Set<SSTableReader> filtered = new HashSet<>();
-            for (Range<Token> range : ranges)
+            ArrayList<SSTableReader> filtered = new ArrayList<>();
+            for (SSTableReader sstable : sstables)
             {
-                for (SSTableReader sstable : sstables)
-                {
-                    Range<Token> sstableRange = new Range<>(sstable.first.getToken(), sstable.last.getToken());
-                    if (range == null || sstableRange.intersects(range))
-                        filtered.add(sstable);
-                }
+                Range<Token> sstableRange = new Range<>(sstable.first.getToken(), sstable.last.getToken());
+                if (range == null || sstableRange.intersects(range))
+                    filtered.add(sstable);
             }
             return filtered;
         }
 
-        public TableMetadata metadata()
+        public boolean isForThrift()
         {
-            return metadata;
+            return false;
+        }
+
+        public CFMetaData metadata()
+        {
+            return sstables.get(0).metadata; // The ctor checks we have at least one sstable
         }
 
         protected UnfilteredRowIterator computeNext()
@@ -426,8 +355,6 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
                     return currentScanner.next();
 
                 positionOffset += currentScanner.getLengthInBytes();
-                totalBytesScanned += currentScanner.getBytesScanned();
-
                 currentScanner.close();
                 if (!sstableIterator.hasNext())
                 {
@@ -435,8 +362,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
                     currentScanner = null;
                     return endOfData();
                 }
-                SSTableReader currentSSTable = sstableIterator.next();
-                currentScanner = currentSSTable.getScanner(ranges);
+                currentScanner = sstableIterator.next().getScanner(range, CompactionManager.instance.getRateLimiter());
             }
         }
 
@@ -454,16 +380,6 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
         public long getCurrentPosition()
         {
             return positionOffset + (currentScanner == null ? 0L : currentScanner.getCurrentPosition());
-        }
-
-        public long getCompressedLengthInBytes()
-        {
-            return compressedLength;
-        }
-
-        public long getBytesScanned()
-        {
-            return currentScanner == null ? totalBytesScanned : totalBytesScanned + currentScanner.getBytesScanned();
         }
 
         public String getBackingFiles()
@@ -508,26 +424,6 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
         return null;
     }
 
-    public CompactionLogger.Strategy strategyLogger()
-    {
-        return new CompactionLogger.Strategy()
-        {
-            public JsonNode sstable(SSTableReader sstable)
-            {
-                ObjectNode node = JsonNodeFactory.instance.objectNode();
-                node.put("level", sstable.getSSTableLevel());
-                node.put("min_token", sstable.first.getToken().toString());
-                node.put("max_token", sstable.last.getToken().toString());
-                return node;
-            }
-
-            public JsonNode options()
-            {
-                return null;
-            }
-        };
-    }
-
     public static Map<String, String> validateOptions(Map<String, String> options) throws ConfigurationException
     {
         Map<String, String> uncheckedOptions = AbstractCompactionStrategy.validateOptions(options);
@@ -547,23 +443,6 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
         }
 
         uncheckedOptions.remove(SSTABLE_SIZE_OPTION);
-
-        // Validate the fanout_size option
-        String levelFanoutSize = options.containsKey(LEVEL_FANOUT_SIZE_OPTION) ? options.get(LEVEL_FANOUT_SIZE_OPTION) : String.valueOf(DEFAULT_LEVEL_FANOUT_SIZE);
-        try
-        {
-            int fanoutSize = Integer.parseInt(levelFanoutSize);
-            if (fanoutSize < 1)
-            {
-                throw new ConfigurationException(String.format("%s must be larger than 0, but was %s", LEVEL_FANOUT_SIZE_OPTION, fanoutSize));
-            }
-        }
-        catch (NumberFormatException ex)
-        {
-            throw new ConfigurationException(String.format("%s is not a parsable int (base10) for %s", size, LEVEL_FANOUT_SIZE_OPTION), ex);
-        }
-
-        uncheckedOptions.remove(LEVEL_FANOUT_SIZE_OPTION);
 
         uncheckedOptions = SizeTieredCompactionStrategyOptions.validateOptions(options, uncheckedOptions);
 

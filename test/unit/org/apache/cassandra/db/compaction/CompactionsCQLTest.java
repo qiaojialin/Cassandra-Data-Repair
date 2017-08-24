@@ -18,22 +18,24 @@
 package org.apache.cassandra.db.compaction;
 
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.UntypedResultSet;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.utils.FBUtilities;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 public class CompactionsCQLTest extends CQLTester
 {
 
-    public static final int SLEEP_TIME = 5000;
+    public static final int SLEEP_TIME = FBUtilities.isWindows()? 2000 : 1000;
 
     @Test
     public void testTriggerMinorCompactionSTCS() throws Throwable
@@ -44,19 +46,21 @@ public class CompactionsCQLTest extends CQLTester
         flush();
         execute("insert into %s (id) values ('1')");
         flush();
-        waitForMinor(KEYSPACE, currentTable(), SLEEP_TIME, true);
+        Thread.sleep(SLEEP_TIME);
+        assertTrue(minorWasTriggered(KEYSPACE, currentTable()));
     }
 
     @Test
     public void testTriggerMinorCompactionLCS() throws Throwable
     {
-        createTable("CREATE TABLE %s (id text PRIMARY KEY) WITH compaction = {'class':'LeveledCompactionStrategy', 'sstable_size_in_mb':1, 'fanout_size':5};");
+        createTable("CREATE TABLE %s (id text PRIMARY KEY) WITH compaction = {'class':'LeveledCompactionStrategy', 'sstable_size_in_mb':1};");
         assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
         execute("insert into %s (id) values ('1')");
         flush();
         execute("insert into %s (id) values ('1')");
         flush();
-        waitForMinor(KEYSPACE, currentTable(), SLEEP_TIME, true);
+        Thread.sleep(SLEEP_TIME);
+        assertTrue(minorWasTriggered(KEYSPACE, currentTable()));
     }
 
 
@@ -65,25 +69,13 @@ public class CompactionsCQLTest extends CQLTester
     {
         createTable("CREATE TABLE %s (id text PRIMARY KEY) WITH compaction = {'class':'DateTieredCompactionStrategy', 'min_threshold':2};");
         assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
-        execute("insert into %s (id) values ('1') using timestamp 1000"); // same timestamp = same window = minor compaction triggered
-        flush();
-        execute("insert into %s (id) values ('1') using timestamp 1000");
-        flush();
-        waitForMinor(KEYSPACE, currentTable(), SLEEP_TIME, true);
-    }
-
-    @Test
-    public void testTriggerMinorCompactionTWCS() throws Throwable
-    {
-        createTable("CREATE TABLE %s (id text PRIMARY KEY) WITH compaction = {'class':'TimeWindowCompactionStrategy', 'min_threshold':2};");
-        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
         execute("insert into %s (id) values ('1')");
         flush();
         execute("insert into %s (id) values ('1')");
         flush();
-        waitForMinor(KEYSPACE, currentTable(), SLEEP_TIME, true);
+        Thread.sleep(SLEEP_TIME);
+        assertTrue(minorWasTriggered(KEYSPACE, currentTable()));
     }
-
 
     @Test
     public void testTriggerNoMinorCompactionSTCSDisabled() throws Throwable
@@ -94,7 +86,8 @@ public class CompactionsCQLTest extends CQLTester
         flush();
         execute("insert into %s (id) values ('1')");
         flush();
-        waitForMinor(KEYSPACE, currentTable(), SLEEP_TIME, false);
+        Thread.sleep(SLEEP_TIME);
+        assertFalse(minorWasTriggered(KEYSPACE, currentTable()));
     }
 
     @Test
@@ -108,7 +101,8 @@ public class CompactionsCQLTest extends CQLTester
         flush();
         execute("insert into %s (id) values ('1')");
         flush();
-        waitForMinor(KEYSPACE, currentTable(), SLEEP_TIME, true);
+        Thread.sleep(SLEEP_TIME);
+        assertTrue(minorWasTriggered(KEYSPACE, currentTable()));
     }
 
     @Test
@@ -122,7 +116,8 @@ public class CompactionsCQLTest extends CQLTester
         flush();
         execute("insert into %s (id) values ('1')");
         flush();
-        waitForMinor(KEYSPACE, currentTable(), SLEEP_TIME, false);
+        Thread.sleep(SLEEP_TIME);
+        assertFalse(minorWasTriggered(KEYSPACE, currentTable()));
     }
 
     @Test
@@ -136,7 +131,8 @@ public class CompactionsCQLTest extends CQLTester
         flush();
         execute("insert into %s (id) values ('1')");
         flush();
-        waitForMinor(KEYSPACE, currentTable(), SLEEP_TIME, false);
+        Thread.sleep(SLEEP_TIME);
+        assertFalse(minorWasTriggered(KEYSPACE, currentTable()));
     }
 
     @Test
@@ -150,7 +146,8 @@ public class CompactionsCQLTest extends CQLTester
         flush();
         execute("insert into %s (id) values ('1')");
         flush();
-        waitForMinor(KEYSPACE, currentTable(), SLEEP_TIME, true);
+        Thread.sleep(SLEEP_TIME);
+        assertTrue(minorWasTriggered(KEYSPACE, currentTable()));
     }
 
     @Test
@@ -218,32 +215,24 @@ public class CompactionsCQLTest extends CQLTester
     public boolean verifyStrategies(CompactionStrategyManager manager, Class<? extends AbstractCompactionStrategy> expected)
     {
         boolean found = false;
-        for (List<AbstractCompactionStrategy> strategies : manager.getStrategies())
+        for (AbstractCompactionStrategy actualStrategy : manager.getStrategies())
         {
-            if (!strategies.stream().allMatch((strategy) -> strategy.getClass().equals(expected)))
+            if (!actualStrategy.getClass().equals(expected))
                 return false;
             found = true;
         }
         return found;
     }
 
-    private void waitForMinor(String keyspace, String cf, long maxWaitTime, boolean shouldFind) throws Throwable
+    private boolean minorWasTriggered(String keyspace, String cf) throws Throwable
     {
-        long startTime = System.currentTimeMillis();
-        while (System.currentTimeMillis() - startTime < maxWaitTime)
+        UntypedResultSet res = execute("SELECT * FROM system.compaction_history");
+        boolean minorWasTriggered = false;
+        for (UntypedResultSet.Row r : res)
         {
-            UntypedResultSet res = execute("SELECT * FROM system.compaction_history");
-            for (UntypedResultSet.Row r : res)
-            {
-                if (r.getString("keyspace_name").equals(keyspace) && r.getString("columnfamily_name").equals(cf))
-                    if (shouldFind)
-                        return;
-                    else
-                        fail("Found minor compaction");
-            }
-            Thread.sleep(100);
+            if (r.getString("keyspace_name").equals(keyspace) && r.getString("columnfamily_name").equals(cf))
+                minorWasTriggered = true;
         }
-        if (shouldFind)
-            fail("No minor compaction triggered in "+maxWaitTime+"ms");
+        return minorWasTriggered;
     }
 }

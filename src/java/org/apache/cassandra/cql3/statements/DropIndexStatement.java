@@ -18,15 +18,15 @@
 package org.apache.cassandra.cql3.statements;
 
 import org.apache.cassandra.auth.Permission;
-import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.cql3.IndexName;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.db.KeyspaceNotDefinedException;
 import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.schema.MigrationManager;
+import org.apache.cassandra.service.MigrationManager;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.Event;
 import org.apache.cassandra.transport.messages.ResultMessage;
@@ -45,17 +45,17 @@ public class DropIndexStatement extends SchemaAlteringStatement
 
     public String columnFamily()
     {
-        TableMetadata metadata = lookupIndexedTable();
-        return metadata == null ? null : metadata.name;
+        CFMetaData cfm = lookupIndexedTable();
+        return cfm == null ? null : cfm.cfName;
     }
 
     public void checkAccess(ClientState state) throws UnauthorizedException, InvalidRequestException
     {
-        TableMetadata metadata = lookupIndexedTable();
-        if (metadata == null)
+        CFMetaData cfm = lookupIndexedTable();
+        if (cfm == null)
             return;
 
-        state.hasColumnFamilyAccess(metadata.keyspace, metadata.name, Permission.ALTER);
+        state.hasColumnFamilyAccess(cfm.ksName, cfm.cfName, Permission.ALTER);
     }
 
     public void validate(ClientState state)
@@ -64,28 +64,25 @@ public class DropIndexStatement extends SchemaAlteringStatement
     }
 
     @Override
-    public ResultMessage execute(QueryState state, QueryOptions options, long queryStartNanoTime) throws RequestValidationException
+    public ResultMessage execute(QueryState state, QueryOptions options) throws RequestValidationException
     {
-        Event.SchemaChange ce = announceMigration(state, false);
+        Event.SchemaChange ce = announceMigration(false);
         return ce == null ? null : new ResultMessage.SchemaChange(ce);
     }
 
-    public Event.SchemaChange announceMigration(QueryState queryState, boolean isLocalOnly) throws InvalidRequestException, ConfigurationException
+    public Event.SchemaChange announceMigration(boolean isLocalOnly) throws InvalidRequestException, ConfigurationException
     {
-        TableMetadata current = lookupIndexedTable();
-        if (current == null)
+        CFMetaData cfm = lookupIndexedTable();
+        if (cfm == null)
             return null;
 
-        TableMetadata updated =
-            current.unbuild()
-                   .indexes(current.indexes.without(indexName))
-                   .build();
-
-        MigrationManager.announceTableUpdate(updated, isLocalOnly);
+        CFMetaData updatedCfm = cfm.copy();
+        updatedCfm.indexes(updatedCfm.getIndexes().without(indexName));
+        MigrationManager.announceColumnFamilyUpdate(updatedCfm, false, isLocalOnly);
         // Dropping an index is akin to updating the CF
         // Note that we shouldn't call columnFamily() at this point because the index has been dropped and the call to lookupIndexedTable()
         // in that method would now throw.
-        return new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, Event.SchemaChange.Target.TABLE, current.keyspace, current.name);
+        return new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, Event.SchemaChange.Target.TABLE, cfm.ksName, cfm.cfName);
     }
 
     /**
@@ -97,9 +94,9 @@ public class DropIndexStatement extends SchemaAlteringStatement
      * @throws InvalidRequestException if the index cannot be found and "IF EXISTS" is not
      * set on the statement.
      */
-    private TableMetadata lookupIndexedTable()
+    private CFMetaData lookupIndexedTable()
     {
-        KeyspaceMetadata ksm = Schema.instance.getKeyspaceMetadata(keyspace());
+        KeyspaceMetadata ksm = Schema.instance.getKSMetaData(keyspace());
         if (ksm == null)
             throw new KeyspaceNotDefinedException("Keyspace " + keyspace() + " does not exist");
 

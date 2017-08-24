@@ -21,19 +21,19 @@ import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.util.Objects;
 
-import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.utils.memory.AbstractAllocator;
 
 /**
  * A range tombstone marker that represents a boundary between 2 range tombstones (i.e. it closes one range and open another).
  */
-public class RangeTombstoneBoundaryMarker extends AbstractRangeTombstoneMarker<ClusteringBoundary>
+public class RangeTombstoneBoundaryMarker extends AbstractRangeTombstoneMarker
 {
     private final DeletionTime endDeletion;
     private final DeletionTime startDeletion;
 
-    public RangeTombstoneBoundaryMarker(ClusteringBoundary bound, DeletionTime endDeletion, DeletionTime startDeletion)
+    public RangeTombstoneBoundaryMarker(RangeTombstone.Bound bound, DeletionTime endDeletion, DeletionTime startDeletion)
     {
         super(bound);
         assert bound.isBoundary();
@@ -43,7 +43,7 @@ public class RangeTombstoneBoundaryMarker extends AbstractRangeTombstoneMarker<C
 
     public static RangeTombstoneBoundaryMarker exclusiveCloseInclusiveOpen(boolean reversed, ByteBuffer[] boundValues, DeletionTime closeDeletion, DeletionTime openDeletion)
     {
-        ClusteringBoundary bound = ClusteringBoundary.exclusiveCloseInclusiveOpen(reversed, boundValues);
+        RangeTombstone.Bound bound = RangeTombstone.Bound.exclusiveCloseInclusiveOpen(reversed, boundValues);
         DeletionTime endDeletion = reversed ? openDeletion : closeDeletion;
         DeletionTime startDeletion = reversed ? closeDeletion : openDeletion;
         return new RangeTombstoneBoundaryMarker(bound, endDeletion, startDeletion);
@@ -51,7 +51,7 @@ public class RangeTombstoneBoundaryMarker extends AbstractRangeTombstoneMarker<C
 
     public static RangeTombstoneBoundaryMarker inclusiveCloseExclusiveOpen(boolean reversed, ByteBuffer[] boundValues, DeletionTime closeDeletion, DeletionTime openDeletion)
     {
-        ClusteringBoundary bound = ClusteringBoundary.inclusiveCloseExclusiveOpen(reversed, boundValues);
+        RangeTombstone.Bound bound = RangeTombstone.Bound.inclusiveCloseExclusiveOpen(reversed, boundValues);
         DeletionTime endDeletion = reversed ? openDeletion : closeDeletion;
         DeletionTime startDeletion = reversed ? closeDeletion : openDeletion;
         return new RangeTombstoneBoundaryMarker(bound, endDeletion, startDeletion);
@@ -88,14 +88,14 @@ public class RangeTombstoneBoundaryMarker extends AbstractRangeTombstoneMarker<C
         return (bound.kind() == ClusteringPrefix.Kind.EXCL_END_INCL_START_BOUNDARY) ^ reversed;
     }
 
-    public ClusteringBound openBound(boolean reversed)
+    public RangeTombstone.Bound openBound(boolean reversed)
     {
-        return bound.openBound(reversed);
+        return bound.withNewKind(bound.kind().openBoundOfBoundary(reversed));
     }
 
-    public ClusteringBound closeBound(boolean reversed)
+    public RangeTombstone.Bound closeBound(boolean reversed)
     {
-        return bound.closeBound(reversed);
+        return bound.withNewKind(bound.kind().closeBoundOfBoundary(reversed));
     }
 
     public boolean closeIsInclusive(boolean reversed)
@@ -120,14 +120,9 @@ public class RangeTombstoneBoundaryMarker extends AbstractRangeTombstoneMarker<C
         return new RangeTombstoneBoundaryMarker(clustering().copy(allocator), endDeletion, startDeletion);
     }
 
-    public RangeTombstoneBoundaryMarker withNewOpeningDeletionTime(boolean reversed, DeletionTime newDeletionTime)
+    public static RangeTombstoneBoundaryMarker makeBoundary(boolean reversed, Slice.Bound close, Slice.Bound open, DeletionTime closeDeletion, DeletionTime openDeletion)
     {
-        return new RangeTombstoneBoundaryMarker(clustering(), reversed ? newDeletionTime : endDeletion, reversed ? startDeletion : newDeletionTime);
-    }
-
-    public static RangeTombstoneBoundaryMarker makeBoundary(boolean reversed, ClusteringBound close, ClusteringBound open, DeletionTime closeDeletion, DeletionTime openDeletion)
-    {
-        assert ClusteringPrefix.Kind.compare(close.kind(), open.kind()) == 0 : "Both bound don't form a boundary";
+        assert RangeTombstone.Bound.Kind.compare(close.kind(), open.kind()) == 0 : "Both bound don't form a boundary";
         boolean isExclusiveClose = close.isExclusive() || (close.isInclusive() && open.isInclusive() && openDeletion.supersedes(closeDeletion));
         return isExclusiveClose
              ? exclusiveCloseInclusiveOpen(reversed, close.getRawValues(), closeDeletion, openDeletion)
@@ -151,7 +146,7 @@ public class RangeTombstoneBoundaryMarker extends AbstractRangeTombstoneMarker<C
         startDeletion.digest(digest);
     }
 
-    public String toString(TableMetadata metadata)
+    public String toString(CFMetaData metadata)
     {
         return String.format("Marker %s@%d-%d", bound.toString(metadata), endDeletion.markedForDeleteAt(), startDeletion.markedForDeleteAt());
     }

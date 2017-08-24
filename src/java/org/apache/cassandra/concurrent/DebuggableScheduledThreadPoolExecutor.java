@@ -47,14 +47,14 @@ public class DebuggableScheduledThreadPoolExecutor extends ScheduledThreadPoolEx
         {
             if (executor.isShutdown())
             {
-                if (!StorageService.instance.isShutdown())
+                if (!StorageService.instance.isInShutdownHook())
                     throw new RejectedExecutionException("ScheduledThreadPoolExecutor has shut down.");
 
                 //Give some notification to the caller the task isn't going to run
                 if (task instanceof Future)
                     ((Future) task).cancel(false);
 
-                logger.debug("ScheduledThreadPoolExecutor has shut down as part of C* shutdown");
+                logger.trace("ScheduledThreadPoolExecutor has shut down as part of C* shutdown");
             }
             else
             {

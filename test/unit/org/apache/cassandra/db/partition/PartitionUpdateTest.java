@@ -17,8 +17,7 @@
  */
 package org.apache.cassandra.db.partition;
 
-import org.apache.cassandra.UpdateBuilder;
-import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
@@ -33,26 +32,30 @@ public class PartitionUpdateTest extends CQLTester
     public void testOperationCount()
     {
         createTable("CREATE TABLE %s (key text, clustering int, a int, s int static, PRIMARY KEY(key, clustering))");
-        TableMetadata cfm = currentTableMetadata();
+        CFMetaData cfm = currentTableMetadata();
 
-        UpdateBuilder builder = UpdateBuilder.create(cfm, "key0");
-        Assert.assertEquals(0, builder.build().operationCount());
-        Assert.assertEquals(1, builder.newRow(1).add("a", 1).build().operationCount());
+        long timestamp = FBUtilities.timestampMicros();
+        PartitionUpdate update = new RowUpdateBuilder(cfm, timestamp, "key0").clustering(1).add("a", 1).buildUpdate();
+        Assert.assertEquals(1, update.operationCount());
 
-        builder = UpdateBuilder.create(cfm, "key0");
-        Assert.assertEquals(1, builder.newRow().add("s", 1).build().operationCount());
+        update = new RowUpdateBuilder(cfm, timestamp, "key0").buildUpdate();
+        Assert.assertEquals(0, update.operationCount());
 
-        builder = UpdateBuilder.create(cfm, "key0");
-        builder.newRow().add("s", 1);
-        builder.newRow(1).add("a", 1);
-        Assert.assertEquals(2, builder.build().operationCount());
+        update = new RowUpdateBuilder(cfm, timestamp, "key0").add("s", 1).buildUpdate();
+        Assert.assertEquals(1, update.operationCount());
+
+        update = new RowUpdateBuilder(cfm, timestamp, "key0").add("s", 1).buildUpdate();
+        update = new RowUpdateBuilder(update, timestamp, cfm.params.defaultTimeToLive).clustering(1)
+                                                                                      .add("a", 1)
+                                                                                      .buildUpdate();
+        Assert.assertEquals(2, update.operationCount());
     }
 
     @Test
     public void testOperationCountWithCompactTable()
     {
         createTable("CREATE TABLE %s (key text PRIMARY KEY, a int) WITH COMPACT STORAGE");
-        TableMetadata cfm = currentTableMetadata();
+        CFMetaData cfm = currentTableMetadata();
 
         PartitionUpdate update = new RowUpdateBuilder(cfm, FBUtilities.timestampMicros(), "key0").add("a", 1)
                                                                                                  .buildUpdate();

@@ -37,7 +37,6 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.repair.messages.ValidationComplete;
-import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MerkleTree;
@@ -59,8 +58,6 @@ public class Validator implements Runnable
     public final RepairJobDesc desc;
     public final InetAddress initiator;
     public final int gcBefore;
-    private final boolean evenTreeDistribution;
-    public final boolean isConsistent;
 
     // null when all rows with the min token have been consumed
     private long validated;
@@ -72,47 +69,30 @@ public class Validator implements Runnable
     // last key seen
     private DecoratedKey lastKey;
 
-    private final PreviewKind previewKind;
-
-    public Validator(RepairJobDesc desc, InetAddress initiator, int gcBefore, PreviewKind previewKind)
-    {
-        this(desc, initiator, gcBefore, false, false, previewKind);
-    }
-
-    public Validator(RepairJobDesc desc, InetAddress initiator, int gcBefore, boolean isConsistent, PreviewKind previewKind)
-    {
-        this(desc, initiator, gcBefore, false, isConsistent, previewKind);
-    }
-
-    public Validator(RepairJobDesc desc, InetAddress initiator, int gcBefore, boolean evenTreeDistribution, boolean isConsistent, PreviewKind previewKind)
+    public Validator(RepairJobDesc desc, InetAddress initiator, int gcBefore)
     {
         this.desc = desc;
         this.initiator = initiator;
         this.gcBefore = gcBefore;
-        this.isConsistent = isConsistent;
-        this.previewKind = previewKind;
         validated = 0;
         range = null;
         ranges = null;
-        this.evenTreeDistribution = evenTreeDistribution;
     }
 
     public void prepare(ColumnFamilyStore cfs, MerkleTrees tree)
     {
         this.trees = tree;
 
-        if (!tree.partitioner().preservesOrder() || evenTreeDistribution)
+        if (!tree.partitioner().preservesOrder())
         {
             // You can't beat an even tree distribution for md5
             tree.init();
         }
         else
         {
-            List<DecoratedKey> keys = new ArrayList<>();
-            Random random = new Random();
-
             for (Range<Token> range : tree.ranges())
             {
+                List<DecoratedKey> keys = new ArrayList<>();
                 for (DecoratedKey sample : cfs.keySamples(range))
                 {
                     assert range.contains(sample.getToken()) : "Token " + sample.getToken() + " is not within range " + desc.ranges;
@@ -127,6 +107,7 @@ public class Validator implements Runnable
                 else
                 {
                     int numKeys = keys.size();
+                    Random random = new Random();
                     // sample the column family using random keys from the index
                     while (true)
                     {
@@ -134,7 +115,6 @@ public class Validator implements Runnable
                         if (!tree.split(dk.getToken()))
                             break;
                     }
-                    keys.clear();
                 }
             }
         }
@@ -146,7 +126,7 @@ public class Validator implements Runnable
      * Called (in order) for every row present in the CF.
      * Hashes the row, and adds it to the tree being built.
      *
-     * @param partition Partition to add hash
+     * @param row Row to add hash
      */
     public void add(UnfilteredRowIterator partition)
     {
@@ -289,7 +269,7 @@ public class Validator implements Runnable
         // respond to the request that triggered this validation
         if (!initiator.equals(FBUtilities.getBroadcastAddress()))
         {
-            logger.info("{} Sending completed merkle tree to {} for {}.{}", previewKind.logPrefix(desc.sessionId), initiator, desc.keyspace, desc.columnFamily);
+            logger.info(String.format("[repair #%s] Sending completed merkle tree to %s for %s.%s", desc.sessionId, initiator, desc.keyspace, desc.columnFamily));
             Tracing.traceRepair("Sending completed merkle tree to {} for {}.{}", initiator, desc.keyspace, desc.columnFamily);
         }
         MessagingService.instance().sendOneWay(new ValidationComplete(desc, trees).createMessage(), initiator);

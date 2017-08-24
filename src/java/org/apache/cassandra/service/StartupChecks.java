@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.service;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.*;
@@ -30,21 +29,14 @@ import com.google.common.collect.Iterables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.config.Config;
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.schema.SchemaConstants;
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.Directories;
-import org.apache.cassandra.db.SystemKeyspace;
+import org.apache.cassandra.config.Schema;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.StartupException;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.utils.NativeLibrary;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.SigarLibrary;
+import org.apache.cassandra.utils.*;
 
 /**
  * Verifies that the system and environment is in a fit state to be started.
@@ -78,11 +70,9 @@ public class StartupChecks
     private final List<StartupCheck> DEFAULT_TESTS = ImmutableList.of(checkJemalloc,
                                                                       checkValidLaunchDate,
                                                                       checkJMXPorts,
-                                                                      checkJMXProperties,
                                                                       inspectJvmOptions,
-                                                                      checkNativeLibraryInitialization,
+                                                                      checkJnaInitialization,
                                                                       initSigarLibrary,
-                                                                      checkMaxMapCount,
                                                                       checkDataDirs,
                                                                       checkSSTablesFormat,
                                                                       checkSystemKeyspaceState,
@@ -118,9 +108,9 @@ public class StartupChecks
 
     public static final StartupCheck checkJemalloc = new StartupCheck()
     {
-        public void execute()
+        public void execute() throws StartupException
         {
-            if (FBUtilities.isWindows)
+            if (FBUtilities.isWindows())
                 return;
             String jemalloc = System.getProperty("cassandra.libjemalloc");
             if (jemalloc == null)
@@ -144,9 +134,8 @@ public class StartupChecks
         {
             long now = System.currentTimeMillis();
             if (now < EARLIEST_LAUNCH_DATE)
-                throw new StartupException(StartupException.ERR_WRONG_MACHINE_STATE,
-                                           String.format("current machine time is %s, but that is seemingly incorrect. exiting now.",
-                                                         new Date(now).toString()));
+                throw new StartupException(1, String.format("current machine time is %s, but that is seemingly incorrect. exiting now.",
+                                                            new Date(now).toString()));
         }
     };
 
@@ -154,7 +143,7 @@ public class StartupChecks
     {
         public void execute()
         {
-            String jmxPort = System.getProperty("cassandra.jmx.remote.port");
+            String jmxPort = System.getProperty("com.sun.management.jmxremote.port");
             if (jmxPort == null)
             {
                 logger.warn("JMX is not enabled to receive remote connections. Please see cassandra-env.sh for more info.");
@@ -164,19 +153,7 @@ public class StartupChecks
             }
             else
             {
-                logger.info("JMX is enabled to receive remote connections on port: {}", jmxPort);
-            }
-        }
-    };
-
-    public static final StartupCheck checkJMXProperties = new StartupCheck()
-    {
-        public void execute()
-        {
-            if (System.getProperty("com.sun.management.jmxremote.port") != null)
-            {
-                logger.warn("Use of com.sun.management.jmxremote.port at startup is deprecated. " +
-                            "Please use cassandra.jmx.remote.port instead.");
+                logger.info("JMX is enabled to receive remote connections on port: " + jmxPort);
             }
         }
     };
@@ -203,13 +180,13 @@ public class StartupChecks
         }
     };
 
-    public static final StartupCheck checkNativeLibraryInitialization = new StartupCheck()
+    public static final StartupCheck checkJnaInitialization = new StartupCheck()
     {
         public void execute() throws StartupException
         {
-            // Fail-fast if the native library could not be linked.
-            if (!NativeLibrary.isAvailable())
-                throw new StartupException(StartupException.ERR_WRONG_MACHINE_STATE, "The native library could not be initialized properly. ");
+            // Fail-fast if JNA is not available or failing to initialize properly
+            if (!CLibrary.jnaAvailable())
+                throw new StartupException(3, "JNA failing to initialize properly. ");
         }
     };
 
@@ -217,54 +194,7 @@ public class StartupChecks
     {
         public void execute()
         {
-            SigarLibrary.instance.warnIfRunningInDegradedMode();
-        }
-    };
-
-    public static final StartupCheck checkMaxMapCount = new StartupCheck()
-    {
-        private final long EXPECTED_MAX_MAP_COUNT = 1048575;
-        private final String MAX_MAP_COUNT_PATH = "/proc/sys/vm/max_map_count";
-
-        private long getMaxMapCount()
-        {
-            final Path path = Paths.get(MAX_MAP_COUNT_PATH);
-            try (final BufferedReader bufferedReader = Files.newBufferedReader(path))
-            {
-                final String data = bufferedReader.readLine();
-                if (data != null)
-                {
-                    try
-                    {
-                        return Long.parseLong(data);
-                    }
-                    catch (final NumberFormatException e)
-                    {
-                        logger.warn("Unable to parse {}.", path, e);
-                    }
-                }
-            }
-            catch (final IOException e)
-            {
-                logger.warn("IO exception while reading file {}.", path, e);
-            }
-            return -1;
-        }
-
-        public void execute()
-        {
-            if (!FBUtilities.isLinux)
-                return;
-
-            if (DatabaseDescriptor.getDiskAccessMode() == Config.DiskAccessMode.standard &&
-                DatabaseDescriptor.getIndexAccessMode() == Config.DiskAccessMode.standard)
-                return; // no need to check if disk access mode is only standard and not mmap
-
-            long maxMapCount = getMaxMapCount();
-            if (maxMapCount < EXPECTED_MAX_MAP_COUNT)
-                logger.warn("Maximum number of memory map areas per process (vm.max_map_count) {} " +
-                            "is too low, recommended value: {}, you can change it with sysctl.",
-                            maxMapCount, EXPECTED_MAX_MAP_COUNT);
+            new SigarLibrary().warnIfRunningInDegradedMode();
         }
     };
 
@@ -286,14 +216,12 @@ public class StartupChecks
                 logger.warn("Directory {} doesn't exist", dataDir);
                 // if they don't, failing their creation, stop cassandra.
                 if (!dir.mkdirs())
-                    throw new StartupException(StartupException.ERR_WRONG_DISK_STATE,
-                                               "Has no permission to create directory "+ dataDir);
+                    throw new StartupException(3, "Has no permission to create directory "+ dataDir);
             }
 
             // if directories exist verify their permissions
             if (!Directories.verifyFullPermissions(dir, dataDir))
-                throw new StartupException(StartupException.ERR_WRONG_DISK_STATE,
-                                           "Insufficient permissions on directory " + dataDir);
+                throw new StartupException(3, "Insufficient permissions on directory " + dataDir);
         }
     };
 
@@ -302,22 +230,16 @@ public class StartupChecks
         public void execute() throws StartupException
         {
             final Set<String> invalid = new HashSet<>();
-            final Set<String> nonSSTablePaths = new HashSet<>();
-            nonSSTablePaths.add(FileUtils.getCanonicalPath(DatabaseDescriptor.getCommitLogLocation()));
-            nonSSTablePaths.add(FileUtils.getCanonicalPath(DatabaseDescriptor.getSavedCachesLocation()));
-            nonSSTablePaths.add(FileUtils.getCanonicalPath(DatabaseDescriptor.getHintsDirectory()));
-
             FileVisitor<Path> sstableVisitor = new SimpleFileVisitor<Path>()
             {
-                public FileVisitResult visitFile(Path path, BasicFileAttributes attrs)
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException
                 {
-                    File file = path.toFile();
-                    if (!Descriptor.isValidFile(file))
+                    if (!Descriptor.isValidFile(file.getFileName().toString()))
                         return FileVisitResult.CONTINUE;
 
                     try
                     {
-                        if (!Descriptor.fromFilename(file).isCompatible())
+                        if (!Descriptor.fromFilename(file.toString()).isCompatible())
                             invalid.add(file.toString());
                     }
                     catch (Exception e)
@@ -331,8 +253,7 @@ public class StartupChecks
                 {
                     String name = dir.getFileName().toString();
                     return (name.equals(Directories.SNAPSHOT_SUBDIR)
-                            || name.equals(Directories.BACKUPS_SUBDIR)
-                            || nonSSTablePaths.contains(dir.toFile().getCanonicalPath()))
+                            || name.equals(Directories.BACKUPS_SUBDIR))
                            ? FileVisitResult.SKIP_SUBTREE
                            : FileVisitResult.CONTINUE;
                 }
@@ -351,12 +272,11 @@ public class StartupChecks
             }
 
             if (!invalid.isEmpty())
-                throw new StartupException(StartupException.ERR_WRONG_DISK_STATE,
-                                           String.format("Detected unreadable sstables %s, please check " +
-                                                         "NEWS.txt and ensure that you have upgraded through " +
-                                                         "all required intermediate versions, running " +
-                                                         "upgradesstables",
-                                                         Joiner.on(",").join(invalid)));
+                throw new StartupException(3, String.format("Detected unreadable sstables %s, please check " +
+                                                            "NEWS.txt and ensure that you have upgraded through " +
+                                                            "all required intermediate versions, running " +
+                                                            "upgradesstables",
+                                                            Joiner.on(",").join(invalid)));
 
         }
     };
@@ -369,7 +289,7 @@ public class StartupChecks
             // we do a one-off scrub of the system keyspace first; we can't load the list of the rest of the keyspaces,
             // until system keyspace is opened.
 
-            for (TableMetadata cfm : Schema.instance.getTablesAndViews(SchemaConstants.SYSTEM_KEYSPACE_NAME))
+            for (CFMetaData cfm : Schema.instance.getTablesAndViews(SystemKeyspace.NAME))
                 ColumnFamilyStore.scrubDataDirectories(cfm);
 
             try
@@ -398,7 +318,7 @@ public class StartupChecks
                         String formatMessage = "Cannot start node if snitch's data center (%s) differs from previous data center (%s). " +
                                                "Please fix the snitch configuration, decommission and rebootstrap this node or use the flag -Dcassandra.ignore_dc=true.";
 
-                        throw new StartupException(StartupException.ERR_WRONG_CONFIG, String.format(formatMessage, currentDc, storedDc));
+                        throw new StartupException(100, String.format(formatMessage, currentDc, storedDc));
                     }
                 }
             }
@@ -420,7 +340,7 @@ public class StartupChecks
                         String formatMessage = "Cannot start node if snitch's rack (%s) differs from previous rack (%s). " +
                                                "Please fix the snitch configuration, decommission and rebootstrap this node or use the flag -Dcassandra.ignore_rack=true.";
 
-                        throw new StartupException(StartupException.ERR_WRONG_CONFIG, String.format(formatMessage, currentRack, storedRack));
+                        throw new StartupException(100, String.format(formatMessage, currentRack, storedRack));
                     }
                 }
             }

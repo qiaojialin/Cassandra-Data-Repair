@@ -42,7 +42,6 @@ public class TombstonesTest extends CQLTester
     @BeforeClass
     public static void setUp() throws Throwable
     {
-        DatabaseDescriptor.daemonInitialization();
         DatabaseDescriptor.setTombstoneFailureThreshold(THRESHOLD);
     }
 

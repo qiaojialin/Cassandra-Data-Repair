@@ -24,6 +24,7 @@ import java.util.List;
 import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.cql3.statements.StatementType;
 
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
 
 /**
@@ -138,9 +139,11 @@ public final class Operations implements Iterable<Operation>
         return Iterators.concat(staticOperations.iterator(), regularOperations.iterator());
     }
 
-    public void addFunctionsTo(List<Function> functions)
+    public Iterable<? extends Function> getFunctions()
     {
-        regularOperations.forEach(p -> p.addFunctionsTo(functions));
-        staticOperations.forEach(p -> p.addFunctionsTo(functions));
+        List<Function> functions = new ArrayList<>();
+        for (Operation operation : this)
+            Iterables.addAll(functions, operation.getFunctions());
+        return functions;
     }
 }

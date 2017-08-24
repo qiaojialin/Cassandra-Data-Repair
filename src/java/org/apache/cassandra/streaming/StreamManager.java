@@ -131,7 +131,7 @@ public class StreamManager implements StreamManagerMBean
             {
                 initiatedStreams.remove(result.planId);
             }
-        }, MoreExecutors.directExecutor());
+        }, MoreExecutors.sameThreadExecutor());
 
         initiatedStreams.put(result.planId, result);
     }
@@ -146,7 +146,7 @@ public class StreamManager implements StreamManagerMBean
             {
                 receivingStreams.remove(result.planId);
             }
-        }, MoreExecutors.directExecutor());
+        }, MoreExecutors.sameThreadExecutor());
 
         receivingStreams.put(result.planId, result);
     }

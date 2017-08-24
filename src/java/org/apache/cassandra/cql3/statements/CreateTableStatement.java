@@ -19,7 +19,7 @@ package org.apache.cassandra.cql3.statements;
 
 import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.regex.Pattern;
+
 import com.google.common.collect.HashMultiset;
 import com.google.common.collect.Multiset;
 import org.apache.commons.lang3.StringUtils;
@@ -30,20 +30,21 @@ import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.*;
-import org.apache.cassandra.schema.*;
+import org.apache.cassandra.schema.KeyspaceMetadata;
+import org.apache.cassandra.schema.TableParams;
+import org.apache.cassandra.schema.Types;
 import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.service.MigrationManager;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.Event;
 
 /** A {@code CREATE TABLE} parsed from a CQL query statement. */
 public class CreateTableStatement extends SchemaAlteringStatement
 {
-    private static final Pattern PATTERN_WORD_CHARS = Pattern.compile("\\w+");
-
     private List<AbstractType<?>> keyTypes;
     private List<AbstractType<?>> clusteringTypes;
 
-    private final Map<ByteBuffer, AbstractType> multicellColumns = new HashMap<>();
+    private final Map<ByteBuffer, CollectionType> collections = new HashMap<>();
 
     private final List<ColumnIdentifier> keyAliases = new ArrayList<>();
     private final List<ColumnIdentifier> columnAliases = new ArrayList<>();
@@ -58,15 +59,13 @@ public class CreateTableStatement extends SchemaAlteringStatement
     private final Set<ColumnIdentifier> staticColumns;
     private final TableParams params;
     private final boolean ifNotExists;
-    private final TableId id;
 
-    public CreateTableStatement(CFName name, TableParams params, boolean ifNotExists, Set<ColumnIdentifier> staticColumns, TableId id)
+    public CreateTableStatement(CFName name, TableParams params, boolean ifNotExists, Set<ColumnIdentifier> staticColumns)
     {
         super(name);
         this.params = params;
         this.ifNotExists = ifNotExists;
         this.staticColumns = staticColumns;
-        this.id = id;
     }
 
     public void checkAccess(ClientState state) throws UnauthorizedException, InvalidRequestException
@@ -79,11 +78,11 @@ public class CreateTableStatement extends SchemaAlteringStatement
         // validated in announceMigration()
     }
 
-    public Event.SchemaChange announceMigration(QueryState queryState, boolean isLocalOnly) throws RequestValidationException
+    public Event.SchemaChange announceMigration(boolean isLocalOnly) throws RequestValidationException
     {
         try
         {
-            MigrationManager.announceNewTable(toTableMetadata(), isLocalOnly);
+            MigrationManager.announceNewColumnFamily(getCFMetaData(), isLocalOnly);
             return new Event.SchemaChange(Event.SchemaChange.Change.CREATED, Event.SchemaChange.Target.TABLE, keyspace(), columnFamily());
         }
         catch (AlreadyExistsException e)
@@ -110,33 +109,11 @@ public class CreateTableStatement extends SchemaAlteringStatement
         }
     }
 
-    /**
-     */
-    public static TableMetadata.Builder parse(String cql, String keyspace)
+    public CFMetaData.Builder metadataBuilder()
     {
-        CreateTableStatement.RawStatement raw = CQLFragmentParser.parseAny(CqlParser::createTableStatement, cql, "CREATE TABLE");
-        raw.prepareKeyspace(keyspace);
-        CreateTableStatement prepared = (CreateTableStatement) raw.prepare(Types.none()).statement;
-        return prepared.builder();
-    }
-
-    public TableMetadata.Builder builder()
-    {
-        TableMetadata.Builder builder = TableMetadata.builder(keyspace(), columnFamily());
-
-        if (id != null)
-            builder.id(id);
-
-        builder.isDense(isDense)
-               .isCompound(isCompound)
-               .isCounter(hasCounters)
-               .isSuper(false)
-               .isView(false)
-               .params(params);
-
+        CFMetaData.Builder builder = CFMetaData.Builder.create(keyspace(), columnFamily(), isDense, isCompound, hasCounters);
         for (int i = 0; i < keyAliases.size(); i++)
-            builder.addPartitionKeyColumn(keyAliases.get(i), keyTypes.get(i));
-
+            builder.addPartitionKey(keyAliases.get(i), keyTypes.get(i));
         for (int i = 0; i < columnAliases.size(); i++)
             builder.addClusteringColumn(columnAliases.get(i), clusteringTypes.get(i));
 
@@ -154,14 +131,14 @@ public class CreateTableStatement extends SchemaAlteringStatement
         boolean isCompactTable = isDense || !isCompound;
         if (isCompactTable)
         {
-            CompactTables.DefaultNames names = CompactTables.defaultNameGenerator(builder.columnNames());
+            CompactTables.DefaultNames names = CompactTables.defaultNameGenerator(builder.usedColumnNames());
             // Compact tables always have a clustering and a single regular value.
             if (isStaticCompact)
             {
                 builder.addClusteringColumn(names.defaultClusteringName(), UTF8Type.instance);
                 builder.addRegularColumn(names.defaultCompactValueName(), hasCounters ? CounterColumnType.instance : BytesType.instance);
             }
-            else if (isDense && !builder.hasRegularColumns())
+            else if (isDense && !builder.hasRegulars())
             {
                 // Even for dense, we might not have our regular column if it wasn't part of the declaration. If
                 // that's the case, add it but with a specific EmptyType so we can recognize that case later
@@ -173,14 +150,20 @@ public class CreateTableStatement extends SchemaAlteringStatement
     }
 
     /**
-     * Returns a TableMetadata instance based on the parameters parsed from this
+     * Returns a CFMetaData instance based on the parameters parsed from this
      * {@code CREATE} statement, or defaults where applicable.
      *
-     * @return a TableMetadata instance corresponding to the values parsed from this statement
+     * @return a CFMetaData instance corresponding to the values parsed from this statement
+     * @throws InvalidRequestException on failure to validate parsed parameters
      */
-    public TableMetadata toTableMetadata()
+    public CFMetaData getCFMetaData()
     {
-        return builder().build();
+        return metadataBuilder().build().params(params);
+    }
+
+    public TableParams params()
+    {
+        return params;
     }
 
     public static class RawStatement extends CFStatement
@@ -207,7 +190,7 @@ public class CreateTableStatement extends SchemaAlteringStatement
          */
         public ParsedStatement.Prepared prepare() throws RequestValidationException
         {
-            KeyspaceMetadata ksm = Schema.instance.getKeyspaceMetadata(keyspace());
+            KeyspaceMetadata ksm = Schema.instance.getKSMetaData(keyspace());
             if (ksm == null)
                 throw new ConfigurationException(String.format("Keyspace %s doesn't exist", keyspace()));
             return prepare(ksm.types);
@@ -216,10 +199,10 @@ public class CreateTableStatement extends SchemaAlteringStatement
         public ParsedStatement.Prepared prepare(Types udts) throws RequestValidationException
         {
             // Column family name
-            if (!PATTERN_WORD_CHARS.matcher(columnFamily()).matches())
+            if (!columnFamily().matches("\\w+"))
                 throw new InvalidRequestException(String.format("\"%s\" is not a valid table name (must be alphanumeric character or underscore only: [a-zA-Z_0-9]+)", columnFamily()));
-            if (columnFamily().length() > SchemaConstants.NAME_LENGTH)
-                throw new InvalidRequestException(String.format("Table names shouldn't be more than %s characters long (got \"%s\")", SchemaConstants.NAME_LENGTH, columnFamily()));
+            if (columnFamily().length() > Schema.NAME_LENGTH)
+                throw new InvalidRequestException(String.format("Table names shouldn't be more than %s characters long (got \"%s\")", Schema.NAME_LENGTH, columnFamily()));
 
             for (Multiset.Entry<ColumnIdentifier> entry : definedNames.entrySet())
                 if (entry.getCount() > 1)
@@ -229,30 +212,16 @@ public class CreateTableStatement extends SchemaAlteringStatement
 
             TableParams params = properties.properties.asNewTableParams();
 
-            CreateTableStatement stmt = new CreateTableStatement(cfName, params, ifNotExists, staticColumns, properties.properties.getId());
+            CreateTableStatement stmt = new CreateTableStatement(cfName, params, ifNotExists, staticColumns);
 
             for (Map.Entry<ColumnIdentifier, CQL3Type.Raw> entry : definitions.entrySet())
             {
                 ColumnIdentifier id = entry.getKey();
                 CQL3Type pt = entry.getValue().prepare(keyspace(), udts);
-                if (pt.getType().isMultiCell())
-                    stmt.multicellColumns.put(id.bytes, pt.getType());
+                if (pt.isCollection() && ((CollectionType)pt.getType()).isMultiCell())
+                    stmt.collections.put(id.bytes, (CollectionType)pt.getType());
                 if (entry.getValue().isCounter())
                     stmt.hasCounters = true;
-
-                // check for non-frozen UDTs or collections in a non-frozen UDT
-                if (pt.getType().isUDT() && pt.getType().isMultiCell())
-                {
-                    for (AbstractType<?> innerType : ((UserType) pt.getType()).fieldTypes())
-                    {
-                        if (innerType.isMultiCell())
-                        {
-                            assert innerType.isCollection();  // shouldn't get this far with a nested non-frozen UDT
-                            throw new InvalidRequestException("Non-frozen UDTs with nested non-frozen collections are not supported");
-                        }
-                    }
-                }
-
                 stmt.columns.put(id, pt.getType()); // we'll remove what is not a column below
             }
 
@@ -269,10 +238,8 @@ public class CreateTableStatement extends SchemaAlteringStatement
             {
                 stmt.keyAliases.add(alias);
                 AbstractType<?> t = getTypeAndRemove(stmt.columns, alias);
-                if (t.asCQL3Type().getType() instanceof CounterColumnType)
+                if (t instanceof CounterColumnType)
                     throw new InvalidRequestException(String.format("counter type is not supported for PRIMARY KEY part %s", alias));
-                if (t.asCQL3Type().getType().referencesDuration())
-                    throw new InvalidRequestException(String.format("duration type is not supported for PRIMARY KEY part %s", alias));
                 if (staticColumns.contains(alias))
                     throw new InvalidRequestException(String.format("Static column %s cannot be part of the PRIMARY KEY", alias));
                 stmt.keyTypes.add(t);
@@ -285,10 +252,8 @@ public class CreateTableStatement extends SchemaAlteringStatement
                 stmt.columnAliases.add(t);
 
                 AbstractType<?> type = getTypeAndRemove(stmt.columns, t);
-                if (type.asCQL3Type().getType() instanceof CounterColumnType)
+                if (type instanceof CounterColumnType)
                     throw new InvalidRequestException(String.format("counter type is not supported for PRIMARY KEY part %s", t));
-                if (type.asCQL3Type().getType().referencesDuration())
-                    throw new InvalidRequestException(String.format("duration type is not supported for PRIMARY KEY part %s", t));
                 if (staticColumns.contains(t))
                     throw new InvalidRequestException(String.format("Static column %s cannot be part of the PRIMARY KEY", t));
                 stmt.clusteringTypes.add(type);
@@ -304,19 +269,19 @@ public class CreateTableStatement extends SchemaAlteringStatement
             }
 
             boolean useCompactStorage = properties.useCompactStorage;
-            // Dense meant, back with thrift, that no part of the "thrift column name" stores a "CQL/metadata column name".
-            // This means COMPACT STORAGE with at least one clustering type (otherwise it's a "static" CF).
+            // Dense means that on the thrift side, no part of the "thrift column name" stores a "CQL/metadata column name".
+            // This means COMPACT STORAGE with at least one clustering type (otherwise it's a thrift "static" CF).
             stmt.isDense = useCompactStorage && !stmt.clusteringTypes.isEmpty();
-            // Compound meant the "thrift column name" was a composite one. It's the case unless
-            // we use compact storage COMPACT STORAGE and we have either no clustering columns ("static" CF) or
+            // Compound means that on the thrift side, the "thrift column name" is a composite one. It's the case unless
+            // we use compact storage COMPACT STORAGE and we have either no clustering columns (thrift "static" CF) or
             // only one of them (if more than one, it's a "dense composite").
             stmt.isCompound = !(useCompactStorage && stmt.clusteringTypes.size() <= 1);
 
             // For COMPACT STORAGE, we reject any "feature" that we wouldn't be able to translate back to thrift.
             if (useCompactStorage)
             {
-                if (!stmt.multicellColumns.isEmpty())
-                    throw new InvalidRequestException("Non-frozen collections and UDTs are not supported with COMPACT STORAGE");
+                if (!stmt.collections.isEmpty())
+                    throw new InvalidRequestException("Non-frozen collection types are not supported with COMPACT STORAGE");
                 if (!staticColumns.isEmpty())
                     throw new InvalidRequestException("Static columns are not supported in COMPACT STORAGE tables");
 
@@ -380,13 +345,8 @@ public class CreateTableStatement extends SchemaAlteringStatement
             AbstractType type = columns.get(t);
             if (type == null)
                 throw new InvalidRequestException(String.format("Unknown definition %s referenced in PRIMARY KEY", t));
-            if (type.isMultiCell())
-            {
-                if (type.isCollection())
-                    throw new InvalidRequestException(String.format("Invalid non-frozen collection type for PRIMARY KEY component %s", t));
-                else
-                    throw new InvalidRequestException(String.format("Invalid non-frozen user-defined type for PRIMARY KEY component %s", t));
-            }
+            if (type.isCollection() && type.isMultiCell())
+                throw new InvalidRequestException(String.format("Invalid collection type for PRIMARY KEY component %s", t));
 
             columns.remove(t);
             Boolean isReversed = properties.definedOrdering.get(t);

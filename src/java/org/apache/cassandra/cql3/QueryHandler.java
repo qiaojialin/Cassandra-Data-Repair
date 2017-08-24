@@ -24,7 +24,6 @@ import org.apache.cassandra.cql3.statements.BatchStatement;
 import org.apache.cassandra.cql3.statements.ParsedStatement;
 import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.exceptions.RequestValidationException;
-import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.utils.MD5Digest;
@@ -34,24 +33,23 @@ public interface QueryHandler
     ResultMessage process(String query,
                           QueryState state,
                           QueryOptions options,
-                          Map<String, ByteBuffer> customPayload,
-                          long queryStartNanoTime) throws RequestExecutionException, RequestValidationException;
+                          Map<String, ByteBuffer> customPayload) throws RequestExecutionException, RequestValidationException;
 
     ResultMessage.Prepared prepare(String query,
-                                   ClientState clientState,
+                                   QueryState state,
                                    Map<String, ByteBuffer> customPayload) throws RequestValidationException;
 
     ParsedStatement.Prepared getPrepared(MD5Digest id);
 
+    ParsedStatement.Prepared getPreparedForThrift(Integer id);
+
     ResultMessage processPrepared(CQLStatement statement,
                                   QueryState state,
                                   QueryOptions options,
-                                  Map<String, ByteBuffer> customPayload,
-                                  long queryStartNanoTime) throws RequestExecutionException, RequestValidationException;
+                                  Map<String, ByteBuffer> customPayload) throws RequestExecutionException, RequestValidationException;
 
     ResultMessage processBatch(BatchStatement statement,
                                QueryState state,
                                BatchQueryOptions options,
-                               Map<String, ByteBuffer> customPayload,
-                               long queryStartNanoTime) throws RequestExecutionException, RequestValidationException;
+                               Map<String, ByteBuffer> customPayload) throws RequestExecutionException, RequestValidationException;
 }

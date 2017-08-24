@@ -1,6 +1,6 @@
 package org.apache.cassandra.stress.settings;
 /*
- *
+ * 
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -8,21 +8,19 @@ package org.apache.cassandra.stress.settings;
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- *
+ * 
  *   http://www.apache.org/licenses/LICENSE-2.0
- *
+ * 
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- *
+ * 
  */
 
 
-import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.io.*;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -30,13 +28,11 @@ import java.net.UnknownHostException;
 import java.util.*;
 
 import com.datastax.driver.core.Host;
-import org.apache.cassandra.stress.util.ResultLogger;
 
 public class SettingsNode implements Serializable
 {
     public final List<String> nodes;
     public final boolean isWhiteList;
-    public final String datacenter;
 
     public SettingsNode(Options options)
     {
@@ -45,8 +41,9 @@ public class SettingsNode implements Serializable
             try
             {
                 String node;
-                List<String> tmpNodes = new ArrayList<>();
-                try (BufferedReader in = new BufferedReader(new InputStreamReader(Files.newInputStream(Paths.get(options.file.value())))))
+                List<String> tmpNodes = new ArrayList<String>();
+                BufferedReader in = new BufferedReader(new InputStreamReader(new FileInputStream(options.file.value())));
+                try
                 {
                     while ((node = in.readLine()) != null)
                     {
@@ -54,6 +51,10 @@ public class SettingsNode implements Serializable
                             tmpNodes.add(node);
                     }
                     nodes = Arrays.asList(tmpNodes.toArray(new String[tmpNodes.size()]));
+                }
+                finally
+                {
+                    in.close();
                 }
             }
             catch(IOException ioe)
@@ -63,12 +64,8 @@ public class SettingsNode implements Serializable
 
         }
         else
-        {
             nodes = Arrays.asList(options.list.value().split(","));
-        }
-
         isWhiteList = options.whitelist.setByUser();
-        datacenter = options.datacenter.value();
     }
 
     public Set<String> resolveAllPermitted(StressSettings settings)
@@ -76,6 +73,7 @@ public class SettingsNode implements Serializable
         Set<String> r = new HashSet<>();
         switch (settings.mode.api)
         {
+            case THRIFT_SMART:
             case JAVA_DRIVER_NATIVE:
                 if (!isWhiteList)
                 {
@@ -83,6 +81,7 @@ public class SettingsNode implements Serializable
                         r.add(host.getAddress().getHostName());
                     break;
                 }
+            case THRIFT:
             case SIMPLE_NATIVE:
                 for (InetAddress address : resolveAllSpecified())
                     r.add(address.getHostName());
@@ -136,7 +135,6 @@ public class SettingsNode implements Serializable
 
     public static final class Options extends GroupedOptions
     {
-        final OptionSimple datacenter = new OptionSimple("datacenter=", ".*", null, "Datacenter used for DCAwareRoundRobinLoadPolicy", false);
         final OptionSimple whitelist = new OptionSimple("whitelist", "", null, "Limit communications to the provided nodes", false);
         final OptionSimple file = new OptionSimple("file=", ".*", null, "Node file (one per line)", false);
         final OptionSimple list = new OptionSimple("", "[^=,]+(,[^=,]+)*", "localhost", "comma delimited list of nodes", false);
@@ -144,17 +142,11 @@ public class SettingsNode implements Serializable
         @Override
         public List<? extends Option> options()
         {
-            return Arrays.asList(datacenter, whitelist, file, list);
+            return Arrays.asList(whitelist, file, list);
         }
     }
 
     // CLI Utility Methods
-    public void printSettings(ResultLogger out)
-    {
-        out.println("  Nodes: " + nodes);
-        out.println("  Is White List: " + isWhiteList);
-        out.println("  Datacenter: " + datacenter);
-    }
 
     public static SettingsNode get(Map<String, String[]> clArgs)
     {
@@ -179,6 +171,13 @@ public class SettingsNode implements Serializable
 
     public static Runnable helpPrinter()
     {
-        return SettingsNode::printHelp;
+        return new Runnable()
+        {
+            @Override
+            public void run()
+            {
+                printHelp();
+            }
+        };
     }
 }

@@ -21,8 +21,7 @@ import java.io.IOException;
 import java.nio.channels.ReadableByteChannel;
 import java.util.List;
 
-import com.google.common.annotations.VisibleForTesting;
-
+import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.streaming.StreamSession;
@@ -39,23 +38,15 @@ public class OutgoingFileMessage extends StreamMessage
 {
     public static Serializer<OutgoingFileMessage> serializer = new Serializer<OutgoingFileMessage>()
     {
-        public OutgoingFileMessage deserialize(ReadableByteChannel in, int version, StreamSession session)
+        public OutgoingFileMessage deserialize(ReadableByteChannel in, int version, StreamSession session) throws IOException
         {
             throw new UnsupportedOperationException("Not allowed to call deserialize on an outgoing file");
         }
 
         public void serialize(OutgoingFileMessage message, DataOutputStreamPlus out, int version, StreamSession session) throws IOException
         {
-            message.startTransfer();
-            try
-            {
-                message.serialize(out, version, session);
-                session.fileSent(message.header);
-            }
-            finally
-            {
-                message.finishTransfer();
-            }
+            message.serialize(out, version, session);
+            session.fileSent(message.header);
         }
     };
 
@@ -63,26 +54,24 @@ public class OutgoingFileMessage extends StreamMessage
     private final Ref<SSTableReader> ref;
     private final String filename;
     private boolean completed = false;
-    private boolean transferring = false;
 
-    public OutgoingFileMessage(Ref<SSTableReader> ref, int sequenceNumber, long estimatedKeys, List<Pair<Long, Long>> sections, boolean keepSSTableLevel)
+    public OutgoingFileMessage(Ref<SSTableReader> ref, int sequenceNumber, long estimatedKeys, List<Pair<Long, Long>> sections, long repairedAt, boolean keepSSTableLevel)
     {
         super(Type.FILE);
         this.ref = ref;
 
         SSTableReader sstable = ref.get();
         filename = sstable.getFilename();
-        this.header = new FileMessageHeader(sstable.metadata().id,
+        this.header = new FileMessageHeader(sstable.metadata.cfId,
                                             sequenceNumber,
                                             sstable.descriptor.version,
                                             sstable.descriptor.formatType,
                                             estimatedKeys,
                                             sections,
                                             sstable.compression ? sstable.getCompressionMetadata() : null,
-                                            sstable.getRepairedAt(),
-                                            sstable.getPendingRepair(),
+                                            repairedAt,
                                             keepSSTableLevel ? sstable.getSSTableLevel() : 0,
-                                            sstable.header.toComponent());
+                                            sstable.header == null ? null : sstable.header.toComponent());
     }
 
     public synchronized void serialize(DataOutputStreamPlus out, int version, StreamSession session) throws IOException
@@ -102,36 +91,12 @@ public class OutgoingFileMessage extends StreamMessage
         writer.write(out);
     }
 
-    @VisibleForTesting
-    public synchronized void finishTransfer()
-    {
-        transferring = false;
-        //session was aborted mid-transfer, now it's safe to release
-        if (completed)
-        {
-            ref.release();
-        }
-    }
-
-    @VisibleForTesting
-    public synchronized void startTransfer()
-    {
-        if (completed)
-            throw new RuntimeException(String.format("Transfer of file %s already completed or aborted (perhaps session failed?).",
-                                                     filename));
-        transferring = true;
-    }
-
     public synchronized void complete()
     {
         if (!completed)
         {
             completed = true;
-            //release only if not transferring
-            if (!transferring)
-            {
-                ref.release();
-            }
+            ref.release();
         }
     }
 

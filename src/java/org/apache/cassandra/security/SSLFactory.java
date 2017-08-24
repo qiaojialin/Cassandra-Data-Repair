@@ -17,22 +17,19 @@
  */
 package org.apache.cassandra.security;
 
-import java.nio.file.Files;
-import java.nio.file.Paths;
-import java.io.InputStream;
+
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.security.KeyStore;
 import java.security.cert.X509Certificate;
-import java.util.Arrays;
 import java.util.Date;
 import java.util.Enumeration;
-import java.util.List;
+import java.util.Set;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManager;
@@ -40,12 +37,10 @@ import javax.net.ssl.TrustManagerFactory;
 
 import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.base.Predicates;
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 
 /**
@@ -55,24 +50,20 @@ import com.google.common.collect.Sets;
 public final class SSLFactory
 {
     private static final Logger logger = LoggerFactory.getLogger(SSLFactory.class);
+    public static final String[] ACCEPTED_PROTOCOLS = new String[] {"SSLv2Hello", "TLSv1", "TLSv1.1", "TLSv1.2"};
     private static boolean checkedExpiry = false;
 
     public static SSLServerSocket getServerSocket(EncryptionOptions options, InetAddress address, int port) throws IOException
     {
         SSLContext ctx = createSSLContext(options, true);
         SSLServerSocket serverSocket = (SSLServerSocket)ctx.getServerSocketFactory().createServerSocket();
-        try
-        {
-            serverSocket.setReuseAddress(true);
-            prepareSocket(serverSocket, options);
-            serverSocket.bind(new InetSocketAddress(address, port), 500);
-            return serverSocket;
-        }
-        catch (IllegalArgumentException | SecurityException | IOException e)
-        {
-            serverSocket.close();
-            throw e;
-        }
+        serverSocket.setReuseAddress(true);
+        String[] suits = filterCipherSuites(serverSocket.getSupportedCipherSuites(), options.cipher_suites);
+        serverSocket.setEnabledCipherSuites(suits);
+        serverSocket.setNeedClientAuth(options.require_client_auth);
+        serverSocket.setEnabledProtocols(ACCEPTED_PROTOCOLS);
+        serverSocket.bind(new InetSocketAddress(address, port), 500);
+        return serverSocket;
     }
 
     /** Create a socket and connect */
@@ -80,16 +71,10 @@ public final class SSLFactory
     {
         SSLContext ctx = createSSLContext(options, true);
         SSLSocket socket = (SSLSocket) ctx.getSocketFactory().createSocket(address, port, localAddress, localPort);
-        try
-        {
-            prepareSocket(socket, options);
-            return socket;
-        }
-        catch (IllegalArgumentException e)
-        {
-            socket.close();
-            throw e;
-        }
+        String[] suits = filterCipherSuites(socket.getSupportedCipherSuites(), options.cipher_suites);
+        socket.setEnabledCipherSuites(suits);
+        socket.setEnabledProtocols(ACCEPTED_PROTOCOLS);
+        return socket;
     }
 
     /** Create a socket and connect, using any local address */
@@ -97,16 +82,10 @@ public final class SSLFactory
     {
         SSLContext ctx = createSSLContext(options, true);
         SSLSocket socket = (SSLSocket) ctx.getSocketFactory().createSocket(address, port);
-        try
-        {
-            prepareSocket(socket, options);
-            return socket;
-        }
-        catch (IllegalArgumentException e)
-        {
-            socket.close();
-            throw e;
-        }
+        String[] suits = filterCipherSuites(socket.getSupportedCipherSuites(), options.cipher_suites);
+        socket.setEnabledCipherSuites(suits);
+        socket.setEnabledProtocols(ACCEPTED_PROTOCOLS);
+        return socket;
     }
 
     /** Just create a socket */
@@ -114,50 +93,17 @@ public final class SSLFactory
     {
         SSLContext ctx = createSSLContext(options, true);
         SSLSocket socket = (SSLSocket) ctx.getSocketFactory().createSocket();
-        try
-        {
-            prepareSocket(socket, options);
-            return socket;
-        }
-        catch (IllegalArgumentException e)
-        {
-            socket.close();
-            throw e;
-        }
-    }
-
-    /** Sets relevant socket options specified in encryption settings */
-    private static void prepareSocket(SSLServerSocket serverSocket, EncryptionOptions options)
-    {
-        String[] suites = filterCipherSuites(serverSocket.getSupportedCipherSuites(), options.cipher_suites);
-        if(options.require_endpoint_verification)
-        {
-            SSLParameters sslParameters = serverSocket.getSSLParameters();
-            sslParameters.setEndpointIdentificationAlgorithm("HTTPS");
-            serverSocket.setSSLParameters(sslParameters);
-        }
-        serverSocket.setEnabledCipherSuites(suites);
-        serverSocket.setNeedClientAuth(options.require_client_auth);
-    }
-
-    /** Sets relevant socket options specified in encryption settings */
-    private static void prepareSocket(SSLSocket socket, EncryptionOptions options)
-    {
-        String[] suites = filterCipherSuites(socket.getSupportedCipherSuites(), options.cipher_suites);
-        if(options.require_endpoint_verification)
-        {
-            SSLParameters sslParameters = socket.getSSLParameters();
-            sslParameters.setEndpointIdentificationAlgorithm("HTTPS");
-            socket.setSSLParameters(sslParameters);
-        }
-        socket.setEnabledCipherSuites(suites);
+        String[] suits = filterCipherSuites(socket.getSupportedCipherSuites(), options.cipher_suites);
+        socket.setEnabledCipherSuites(suits);
+        socket.setEnabledProtocols(ACCEPTED_PROTOCOLS);
+        return socket;
     }
 
     @SuppressWarnings("resource")
     public static SSLContext createSSLContext(EncryptionOptions options, boolean buildTruststore) throws IOException
     {
-        InputStream tsf = null;
-        InputStream ksf = null;
+        FileInputStream tsf = null;
+        FileInputStream ksf = null;
         SSLContext ctx;
         try
         {
@@ -166,7 +112,7 @@ public final class SSLFactory
 
             if(buildTruststore)
             {
-                tsf = Files.newInputStream(Paths.get(options.truststore));
+                tsf = new FileInputStream(options.truststore);
                 TrustManagerFactory tmf = TrustManagerFactory.getInstance(options.algorithm);
                 KeyStore ts = KeyStore.getInstance(options.store_type);
                 ts.load(tsf, options.truststore_password.toCharArray());
@@ -174,7 +120,7 @@ public final class SSLFactory
                 trustManagers = tmf.getTrustManagers();
             }
 
-            ksf = Files.newInputStream(Paths.get((options.keystore)));
+            ksf = new FileInputStream(options.keystore);
             KeyManagerFactory kmf = KeyManagerFactory.getInstance(options.algorithm);
             KeyStore ks = KeyStore.getInstance(options.store_type);
             ks.load(ksf, options.keystore_password.toCharArray());
@@ -209,18 +155,12 @@ public final class SSLFactory
         return ctx;
     }
 
-    public static String[] filterCipherSuites(String[] supported, String[] desired)
+    private static String[] filterCipherSuites(String[] supported, String[] desired)
     {
-        if (Arrays.equals(supported, desired))
-            return desired;
-        List<String> ldesired = Arrays.asList(desired);
-        ImmutableSet<String> ssupported = ImmutableSet.copyOf(supported);
-        String[] ret = Iterables.toArray(Iterables.filter(ldesired, Predicates.in(ssupported)), String.class);
-        if (desired.length > ret.length && logger.isWarnEnabled())
-        {
-            Iterable<String> missing = Iterables.filter(ldesired, Predicates.not(Predicates.in(Sets.newHashSet(ret))));
-            logger.warn("Filtering out {} as it isn't supported by the socket", Iterables.toString(missing));
-        }
-        return ret;
+        Set<String> des = Sets.newHashSet(desired);
+        Set<String> toReturn = Sets.intersection(Sets.newHashSet(supported), des);
+        if (des.size() > toReturn.size())
+            logger.warn("Filtering out {} as it isnt supported by the socket", StringUtils.join(Sets.difference(des, toReturn), ","));
+        return toReturn.toArray(new String[toReturn.size()]);
     }
 }

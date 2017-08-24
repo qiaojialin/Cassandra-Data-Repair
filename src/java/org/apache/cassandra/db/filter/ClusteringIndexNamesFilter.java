@@ -21,15 +21,15 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
 
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.db.rows.*;
+import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.db.transform.Transformation;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.SearchIterator;
 import org.apache.cassandra.utils.btree.BTreeSet;
 
@@ -126,30 +126,70 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
         return Transformation.apply(iterator, new FilterNotIndexed());
     }
 
-    public Slices getSlices(TableMetadata metadata)
+    public UnfilteredRowIterator filter(final SliceableUnfilteredRowIterator iter)
     {
-        Slices.Builder builder = new Slices.Builder(metadata.comparator, clusteringsInQueryOrder.size());
-        for (Clustering clustering : clusteringsInQueryOrder)
-            builder.add(Slice.make(clustering));
-        return builder.build();
+        // Please note that this method assumes that rows from 'iter' already have their columns filtered, i.e. that
+        // they only include columns that we select.
+        return new WrappingUnfilteredRowIterator(iter)
+        {
+            private final Iterator<Clustering> clusteringIter = clusteringsInQueryOrder.iterator();
+            private Iterator<Unfiltered> currentClustering;
+            private Unfiltered next;
+
+            @Override
+            public boolean hasNext()
+            {
+                if (next != null)
+                    return true;
+
+                if (currentClustering != null && currentClustering.hasNext())
+                {
+                    next = currentClustering.next();
+                    return true;
+                }
+
+                while (clusteringIter.hasNext())
+                {
+                    Clustering nextClustering = clusteringIter.next();
+                    currentClustering = iter.slice(Slice.make(nextClustering));
+                    if (currentClustering.hasNext())
+                    {
+                        next = currentClustering.next();
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            @Override
+            public Unfiltered next()
+            {
+                if (next == null && !hasNext())
+                    throw new NoSuchElementException();
+
+                Unfiltered toReturn = next;
+                next = null;
+                return toReturn;
+            }
+        };
     }
 
     public UnfilteredRowIterator getUnfilteredRowIterator(final ColumnFilter columnFilter, final Partition partition)
     {
-        final Iterator<Clustering> clusteringIter = clusteringsInQueryOrder.iterator();
         final SearchIterator<Clustering, Row> searcher = partition.searchIterator(columnFilter, reversed);
-
         return new AbstractUnfilteredRowIterator(partition.metadata(),
-                                                 partition.partitionKey(),
-                                                 partition.partitionLevelDeletion(),
-                                                 columnFilter.fetchedColumns(),
-                                                 searcher.next(Clustering.STATIC_CLUSTERING),
-                                                 reversed,
-                                                 partition.stats())
+                                        partition.partitionKey(),
+                                        partition.partitionLevelDeletion(),
+                                        columnFilter.fetchedColumns(),
+                                        searcher.next(Clustering.STATIC_CLUSTERING),
+                                        reversed,
+                                        partition.stats())
         {
+            private final Iterator<Clustering> clusteringIter = clusteringsInQueryOrder.iterator();
+
             protected Unfiltered computeNext()
             {
-                while (clusteringIter.hasNext())
+                while (clusteringIter.hasNext() && searcher.hasNext())
                 {
                     Row row = searcher.next(clusteringIter.next());
                     if (row != null)
@@ -162,7 +202,7 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
 
     public boolean shouldInclude(SSTableReader sstable)
     {
-        ClusteringComparator comparator = sstable.metadata().comparator;
+        ClusteringComparator comparator = sstable.metadata.comparator;
         List<ByteBuffer> minClusteringValues = sstable.getSSTableMetadata().minClusteringValues;
         List<ByteBuffer> maxClusteringValues = sstable.getSSTableMetadata().maxClusteringValues;
 
@@ -175,7 +215,7 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
         return false;
     }
 
-    public String toString(TableMetadata metadata)
+    public String toString(CFMetaData metadata)
     {
         StringBuilder sb = new StringBuilder();
         sb.append("names(");
@@ -187,13 +227,13 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
         return sb.append(')').toString();
     }
 
-    public String toCQLString(TableMetadata metadata)
+    public String toCQLString(CFMetaData metadata)
     {
-        if (metadata.clusteringColumns().isEmpty() || clusterings.size() <= 1)
+        if (clusterings.isEmpty())
             return "";
 
         StringBuilder sb = new StringBuilder();
-        sb.append('(').append(ColumnMetadata.toCQLString(metadata.clusteringColumns())).append(')');
+        sb.append('(').append(ColumnDefinition.toCQLString(metadata.clusteringColumns())).append(')');
         sb.append(clusterings.size() == 1 ? " = " : " IN (");
         int i = 0;
         for (Clustering clustering : clusterings)
@@ -228,7 +268,7 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
 
     private static class NamesDeserializer implements InternalDeserializer
     {
-        public ClusteringIndexFilter deserialize(DataInputPlus in, int version, TableMetadata metadata, boolean reversed) throws IOException
+        public ClusteringIndexFilter deserialize(DataInputPlus in, int version, CFMetaData metadata, boolean reversed) throws IOException
         {
             ClusteringComparator comparator = metadata.comparator;
             BTreeSet.Builder<Clustering> clusterings = BTreeSet.builder(comparator);

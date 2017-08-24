@@ -31,7 +31,7 @@ import com.google.common.collect.*;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.Memtable;
-import org.apache.cassandra.db.commitlog.CommitLogPosition;
+import org.apache.cassandra.db.commitlog.ReplayPosition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,7 +49,6 @@ import static com.google.common.base.Predicates.and;
 import static com.google.common.collect.ImmutableSet.copyOf;
 import static com.google.common.collect.Iterables.filter;
 import static java.util.Collections.singleton;
-import static java.util.Collections.singletonList;
 import static org.apache.cassandra.db.lifecycle.Helpers.*;
 import static org.apache.cassandra.db.lifecycle.View.permitCompacting;
 import static org.apache.cassandra.db.lifecycle.View.updateCompacting;
@@ -59,29 +58,21 @@ import static org.apache.cassandra.utils.Throwables.merge;
 import static org.apache.cassandra.utils.concurrent.Refs.release;
 import static org.apache.cassandra.utils.concurrent.Refs.selfRefs;
 
-/**
- * Tracker tracks live {@link View} of data store for a table.
- */
 public class Tracker
 {
     private static final Logger logger = LoggerFactory.getLogger(Tracker.class);
 
-    private final Collection<INotificationConsumer> subscribers = new CopyOnWriteArrayList<>();
-
+    public final Collection<INotificationConsumer> subscribers = new CopyOnWriteArrayList<>();
     public final ColumnFamilyStore cfstore;
     final AtomicReference<View> view;
     public final boolean loadsstables;
 
-    /**
-     * @param memtable Initial Memtable. Can be null.
-     * @param loadsstables true to indicate to load SSTables (TODO: remove as this is only accessed from 2i)
-     */
-    public Tracker(Memtable memtable, boolean loadsstables)
+    public Tracker(ColumnFamilyStore cfstore, boolean loadsstables)
     {
-        this.cfstore = memtable != null ? memtable.cfs : null;
+        this.cfstore = cfstore;
         this.view = new AtomicReference<>();
         this.loadsstables = loadsstables;
-        this.reset(memtable);
+        this.reset();
     }
 
     public LifecycleTransaction tryModify(SSTableReader sstable, OperationType operationType)
@@ -201,13 +192,14 @@ public class Tracker
 
     /** (Re)initializes the tracker, purging all references. */
     @VisibleForTesting
-    public void reset(Memtable memtable)
+    public void reset()
     {
-        view.set(new View(memtable != null ? singletonList(memtable) : Collections.emptyList(),
-                          Collections.emptyList(),
-                          Collections.emptyMap(),
-                          Collections.emptyMap(),
-                          SSTableIntervalTree.empty()));
+        view.set(new View(
+                         !isDummy() ? ImmutableList.of(new Memtable(cfstore)) : Collections.<Memtable>emptyList(),
+                         ImmutableList.<Memtable>of(),
+                         Collections.<SSTableReader, SSTableReader>emptyMap(),
+                         Collections.<SSTableReader, SSTableReader>emptyMap(),
+                         SSTableIntervalTree.empty()));
     }
 
     public Throwable dropSSTablesIfInvalid(Throwable accumulate)
@@ -295,7 +287,7 @@ public class Tracker
     /**
      * get the Memtable that the ordered writeOp should be directed to
      */
-    public Memtable getMemtableFor(OpOrder.Group opGroup, CommitLogPosition commitLogPosition)
+    public Memtable getMemtableFor(OpOrder.Group opGroup, ReplayPosition replayPosition)
     {
         // since any new memtables appended to the list after we fetch it will be for operations started
         // after us, we can safely assume that we will always find the memtable that 'accepts' us;
@@ -306,7 +298,7 @@ public class Tracker
         // assign operations to a memtable that was retired/queued before we started)
         for (Memtable memtable : view.get().liveMemtables)
         {
-            if (memtable.accepts(opGroup, commitLogPosition))
+            if (memtable.accepts(opGroup, replayPosition))
                 return memtable;
         }
         throw new AssertionError(view.get().liveMemtables.toString());
@@ -320,13 +312,12 @@ public class Tracker
      *
      * @return the previously active memtable
      */
-    public Memtable switchMemtable(boolean truncating, Memtable newMemtable)
+    public Memtable switchMemtable(boolean truncating)
     {
+        Memtable newMemtable = new Memtable(cfstore);
         Pair<View, View> result = apply(View.switchMemtable(newMemtable));
         if (truncating)
             notifyRenewed(newMemtable);
-        else
-            notifySwitched(result.left.getCurrentMemtable());
 
         return result.left.getCurrentMemtable();
     }
@@ -336,10 +327,10 @@ public class Tracker
         apply(View.markFlushing(memtable));
     }
 
-    public void replaceFlushed(Memtable memtable, Iterable<SSTableReader> sstables)
+    public void replaceFlushed(Memtable memtable, Collection<SSTableReader> sstables)
     {
         assert !isDummy();
-        if (Iterables.isEmpty(sstables))
+        if (sstables == null || sstables.isEmpty())
         {
             // sstable may be null if we flushed batchlog and nothing needed to be retained
             // if it's null, we don't care what state the cfstore is in, we just replace it and continue
@@ -355,11 +346,8 @@ public class Tracker
 
         Throwable fail;
         fail = updateSizeTracking(emptySet(), sstables, null);
-
-        notifyDiscarded(memtable);
-
         // TODO: if we're invalidated, should we notifyadded AND removed, or just skip both?
-        fail = notifyAdded(sstables, memtable, fail);
+        fail = notifyAdded(sstables, fail);
 
         if (!isDummy() && !cfstore.isValid())
             dropSSTables();
@@ -378,7 +366,7 @@ public class Tracker
 
     public Iterable<SSTableReader> getUncompacting()
     {
-        return view.get().select(SSTableSet.NONCOMPACTING);
+        return view.get().sstables(SSTableSet.NONCOMPACTING);
     }
 
     public Iterable<SSTableReader> getUncompacting(Iterable<SSTableReader> candidates)
@@ -417,9 +405,9 @@ public class Tracker
         return accumulate;
     }
 
-    Throwable notifyAdded(Iterable<SSTableReader> added, Memtable memtable, Throwable accumulate)
+    Throwable notifyAdded(Iterable<SSTableReader> added, Throwable accumulate)
     {
-        INotification notification = new SSTableAddedNotification(added, memtable);
+        INotification notification = new SSTableAddedNotification(added);
         for (INotificationConsumer subscriber : subscribers)
         {
             try
@@ -436,7 +424,7 @@ public class Tracker
 
     public void notifyAdded(Iterable<SSTableReader> added)
     {
-        maybeFail(notifyAdded(added, null, null));
+        maybeFail(notifyAdded(added, null));
     }
 
     public void notifySSTableRepairedStatusChanged(Collection<SSTableReader> repairStatusesChanged)
@@ -453,6 +441,13 @@ public class Tracker
             subscriber.handleNotification(notification, this);
     }
 
+    public void notifyRenewed(Memtable renewed)
+    {
+        INotification notification = new MemtableRenewedNotification(renewed);
+        for (INotificationConsumer subscriber : subscribers)
+            subscriber.handleNotification(notification, this);
+    }
+
     public void notifyTruncated(long truncatedAt)
     {
         INotification notification = new TruncationNotification(truncatedAt);
@@ -460,30 +455,9 @@ public class Tracker
             subscriber.handleNotification(notification, this);
     }
 
-    public void notifyRenewed(Memtable renewed)
-    {
-        notify(new MemtableRenewedNotification(renewed));
-    }
-
-    public void notifySwitched(Memtable previous)
-    {
-        notify(new MemtableSwitchedNotification(previous));
-    }
-
-    public void notifyDiscarded(Memtable discarded)
-    {
-        notify(new MemtableDiscardedNotification(discarded));
-    }
-
-    private void notify(INotification notification)
-    {
-        for (INotificationConsumer subscriber : subscribers)
-            subscriber.handleNotification(notification, this);
-    }
-
     public boolean isDummy()
     {
-        return cfstore == null || !DatabaseDescriptor.isDaemonInitialized();
+        return cfstore == null;
     }
 
     public void subscribe(INotificationConsumer consumer)

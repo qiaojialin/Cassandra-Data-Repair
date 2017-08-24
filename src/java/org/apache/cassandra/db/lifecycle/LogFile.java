@@ -1,27 +1,6 @@
-/*
- *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
- */
 package org.apache.cassandra.db.lifecycle;
 
 import java.io.File;
-import java.nio.file.Path;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -52,7 +31,7 @@ import static org.apache.cassandra.utils.Throwables.merge;
  *
  * @see LogTransaction
  */
-final class LogFile implements AutoCloseable
+final class LogFile
 {
     private static final Logger logger = LoggerFactory.getLogger(LogFile.class);
 
@@ -94,9 +73,9 @@ final class LogFile implements AutoCloseable
         return new LogFile(operationType, id, logReplicas);
     }
 
-    Throwable syncDirectory(Throwable accumulate)
+    Throwable syncFolder(Throwable accumulate)
     {
-        return replicas.syncDirectory(accumulate);
+        return replicas.syncFolder(accumulate);
     }
 
     OperationType type()
@@ -113,17 +92,11 @@ final class LogFile implements AutoCloseable
     {
         try
         {
-            // we sync the parent directories before content deletion to ensure
-            // any previously deleted files (see SSTableTider) are not
-            // incorrectly picked up by record.getExistingFiles() in
-            // deleteRecordFiles(), see CASSANDRA-12261
-            Throwables.maybeFail(syncDirectory(accumulate));
-
             deleteFilesForRecordsOfType(committed() ? Type.REMOVE : Type.ADD);
 
-            // we sync the parent directories between contents and log deletion
+            // we sync the parent folders between contents and log deletion
             // to ensure there is a happens before edge between them
-            Throwables.maybeFail(syncDirectory(accumulate));
+            Throwables.maybeFail(syncFolder(accumulate));
 
             accumulate = replicas.delete(accumulate);
         }
@@ -154,10 +127,10 @@ final class LogFile implements AutoCloseable
 
     boolean verify()
     {
-        records.clear();
+        assert records.isEmpty();
         if (!replicas.readRecords(records))
         {
-            logger.error("Failed to read records for transaction log {}", this);
+            logger.error("Failed to read records from {}", replicas);
             return false;
         }
 
@@ -170,7 +143,7 @@ final class LogFile implements AutoCloseable
         LogRecord failedOn = firstInvalid.get();
         if (getLastRecord() != failedOn)
         {
-            setErrorInReplicas(failedOn);
+            logError(failedOn);
             return false;
         }
 
@@ -178,24 +151,25 @@ final class LogFile implements AutoCloseable
         if (records.stream()
                    .filter((r) -> r != failedOn)
                    .filter(LogRecord::isInvalid)
-                   .map(this::setErrorInReplicas)
+                   .map(LogFile::logError)
                    .findFirst().isPresent())
         {
-            setErrorInReplicas(failedOn);
+            logError(failedOn);
             return false;
         }
 
         // if only the last record is corrupt and all other records have matching files on disk, @see verifyRecord,
         // then we simply exited whilst serializing the last record and we carry on
-        logger.warn("Last record of transaction {} is corrupt or incomplete [{}], " +
-                    "but all previous records match state on disk; continuing",
-                    id, failedOn.error());
+        logger.warn(String.format("Last record of transaction %s is corrupt or incomplete [%s], " +
+                                  "but all previous records match state on disk; continuing",
+                                  id,
+                                  failedOn.error()));
         return true;
     }
 
-    LogRecord setErrorInReplicas(LogRecord record)
+    static LogRecord logError(LogRecord record)
     {
-        replicas.setErrorInReplicas(record);
+        logger.error("{}", record.error());
         return record;
     }
 
@@ -203,8 +177,9 @@ final class LogFile implements AutoCloseable
     {
         if (record.checksum != record.computeChecksum())
         {
-            record.setError(String.format("Invalid checksum for sstable [%s]: [%d] should have been [%d]",
+            record.setError(String.format("Invalid checksum for sstable [%s], record [%s]: [%d] should have been [%d]",
                                           record.fileName(),
+                                          record,
                                           record.checksum,
                                           record.computeChecksum()));
             return;
@@ -220,11 +195,12 @@ final class LogFile implements AutoCloseable
         // it matches. Because we delete files from oldest to newest, the latest update time should
         // always match.
         record.status.onDiskRecord = record.withExistingFiles();
-        if (record.updateTime != record.status.onDiskRecord.updateTime && record.status.onDiskRecord.updateTime > 0)
+        if (record.updateTime != record.status.onDiskRecord.updateTime && record.status.onDiskRecord.numFiles > 0)
         {
-            record.setError(String.format("Unexpected files detected for sstable [%s]: " +
-                                          "last update time [%tT] should have been [%tT]",
+            record.setError(String.format("Unexpected files detected for sstable [%s], " +
+                                          "record [%s]: last update time [%tT] should have been [%tT]",
                                           record.fileName(),
+                                          record,
                                           record.status.onDiskRecord.updateTime,
                                           record.updateTime));
 
@@ -236,9 +212,11 @@ final class LogFile implements AutoCloseable
         if (record.type == Type.REMOVE && record.status.onDiskRecord.numFiles < record.numFiles)
         { // if we found a corruption in the last record, then we continue only
           // if the number of files matches exactly for all previous records.
-            record.setError(String.format("Incomplete fileset detected for sstable [%s]: " +
-                                          "number of files [%d] should have been [%d].",
+            record.setError(String.format("Incomplete fileset detected for sstable [%s], record [%s]: " +
+                                          "number of files [%d] should have been [%d]. Treating as unrecoverable " +
+                                          "due to corruption of the final record.",
                                           record.fileName(),
+                                          record.raw,
                                           record.status.onDiskRecord.numFiles,
                                           record.numFiles));
         }
@@ -289,9 +267,8 @@ final class LogFile implements AutoCloseable
     {
         assert type == Type.ADD || type == Type.REMOVE;
 
-        File directory = table.descriptor.directory;
-        String fileName = StringUtils.join(directory, File.separator, getFileName());
-        replicas.maybeCreateReplica(directory, fileName, records);
+        File folder = table.descriptor.directory;
+        replicas.maybeCreateReplica(folder, getFileName(folder), records);
         return LogRecord.make(type, table);
     }
 
@@ -338,23 +315,13 @@ final class LogFile implements AutoCloseable
         files.forEach(LogTransaction::delete);
     }
 
-    /**
-     * Extract from the files passed in all those that are of the given type.
-     *
-     * Scan all records and select those that are of the given type, valid, and
-     * located in the same folder. For each such record extract from the files passed in
-     * those that belong to this record.
-     *
-     * @return a map linking each mapped record to its files, where the files where passed in as parameters.
-     */
-    Map<LogRecord, Set<File>> getFilesOfType(Path folder, NavigableSet<File> files, Type type)
+    Map<LogRecord, Set<File>> getFilesOfType(NavigableSet<File> files, Type type)
     {
         Map<LogRecord, Set<File>> ret = new HashMap<>();
 
         records.stream()
                .filter(type::matches)
                .filter(LogRecord::isValid)
-               .filter(r -> r.isInFolder(folder))
                .forEach((r) -> ret.put(r, getRecordFiles(files, r)));
 
         return ret;
@@ -376,7 +343,7 @@ final class LogFile implements AutoCloseable
         return replicas.exists();
     }
 
-    public void close()
+    void close()
     {
         replicas.close();
     }
@@ -384,25 +351,7 @@ final class LogFile implements AutoCloseable
     @Override
     public String toString()
     {
-        return toString(false);
-    }
-
-    public String toString(boolean showContents)
-    {
-        StringBuilder str = new StringBuilder();
-        str.append('[');
-        str.append(getFileName());
-        str.append(" in ");
-        str.append(replicas.getDirectories());
-        str.append(']');
-        if (showContents)
-        {
-            str.append(System.lineSeparator());
-            str.append("Files and contents follow:");
-            str.append(System.lineSeparator());
-            replicas.printContentsWithAnyErrors(str);
-        }
-        return str.toString();
+        return replicas.toString();
     }
 
     @VisibleForTesting
@@ -417,15 +366,16 @@ final class LogFile implements AutoCloseable
         return replicas.getFilePaths();
     }
 
-    private String getFileName()
+    private String getFileName(File folder)
     {
-        return StringUtils.join(BigFormat.latestVersion,
-                                LogFile.SEP,
-                                "txn",
-                                LogFile.SEP,
-                                type.fileName,
-                                LogFile.SEP,
-                                id.toString(),
-                                LogFile.EXT);
+        String fileName = StringUtils.join(BigFormat.latestVersion,
+                                           LogFile.SEP,
+                                           "txn",
+                                           LogFile.SEP,
+                                           type.fileName,
+                                           LogFile.SEP,
+                                           id.toString(),
+                                           LogFile.EXT);
+        return StringUtils.join(folder, File.separator, fileName);
     }
 }

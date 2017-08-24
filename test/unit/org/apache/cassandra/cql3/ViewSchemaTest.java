@@ -34,13 +34,12 @@ import junit.framework.Assert;
 import org.apache.cassandra.concurrent.SEPExecutor;
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
-import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.serializers.SimpleDateSerializer;
 import org.apache.cassandra.serializers.TimeSerializer;
-import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.junit.After;
 import org.junit.Before;
@@ -52,7 +51,7 @@ import com.datastax.driver.core.exceptions.InvalidQueryException;
 
 public class ViewSchemaTest extends CQLTester
 {
-    ProtocolVersion protocolVersion = ProtocolVersion.V4;
+    int protocolVersion = 4;
     private final List<String> views = new ArrayList<>();
 
     @BeforeClass
@@ -176,8 +175,8 @@ public class ViewSchemaTest extends CQLTester
 
         //Test alter add
         executeNet(protocolVersion, "ALTER TABLE %s ADD foo text");
-        TableMetadata metadata = Schema.instance.getTableMetadata(keyspace(), "mv1_test");
-        Assert.assertNotNull(metadata.getColumn(ByteBufferUtil.bytes("foo")));
+        CFMetaData metadata = Schema.instance.getCFMetaData(keyspace(), "mv1_test");
+        Assert.assertNotNull(metadata.getColumnDefinition(ByteBufferUtil.bytes("foo")));
 
         updateView("INSERT INTO %s(k,asciival,bigintval,foo)VALUES(?,?,?,?)", 0, "foo", 1L, "bar");
         assertRows(execute("SELECT foo from %s"), row("bar"));
@@ -186,8 +185,8 @@ public class ViewSchemaTest extends CQLTester
         executeNet(protocolVersion, "ALTER TABLE %s RENAME asciival TO bar");
 
         assertRows(execute("SELECT bar from %s"), row("foo"));
-        metadata = Schema.instance.getTableMetadata(keyspace(), "mv1_test");
-        Assert.assertNotNull(metadata.getColumn(ByteBufferUtil.bytes("bar")));
+        metadata = Schema.instance.getCFMetaData(keyspace(), "mv1_test");
+        Assert.assertNotNull(metadata.getColumnDefinition(ByteBufferUtil.bytes("bar")));
     }
 
 
@@ -286,12 +285,12 @@ public class ViewSchemaTest extends CQLTester
                     "tupleval frozen<tuple<int, ascii, uuid>>," +
                     "udtval frozen<" + myType + ">)");
 
-        TableMetadata metadata = currentTableMetadata();
+        CFMetaData metadata = currentTableMetadata();
 
         execute("USE " + keyspace());
         executeNet(protocolVersion, "USE " + keyspace());
 
-        for (ColumnMetadata def : new HashSet<>(metadata.columns()))
+        for (ColumnDefinition def : new HashSet<>(metadata.allColumns()))
         {
             try
             {
@@ -683,5 +682,81 @@ public class ViewSchemaTest extends CQLTester
         {
             Assert.assertEquals("Cannot use DROP TABLE on Materialized View", e.getMessage());
         }
+    }
+
+    @Test
+    public void testAlterTable() throws Throwable
+    {
+        createTable("CREATE TABLE %s (" +
+                    "a int," +
+                    "b text," +
+                    "PRIMARY KEY (a, b))");
+
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        createView("mv1", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE a IS NOT NULL AND b IS NOT NULL PRIMARY KEY (b, a)");
+
+        alterTable("ALTER TABLE %s ALTER b TYPE blob");
+    }
+
+    @Test
+    public void testAlterReversedTypeBaseTable() throws Throwable
+    {
+        createTable("CREATE TABLE %s (" +
+                    "a int," +
+                    "b text," +
+                    "PRIMARY KEY (a, b))" +
+                    "WITH CLUSTERING ORDER BY (b DESC)");
+
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        createView("mv1", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE a IS NOT NULL AND b IS NOT NULL PRIMARY KEY (a, b) WITH CLUSTERING ORDER BY (b ASC)");
+
+        alterTable("ALTER TABLE %s ALTER b TYPE blob");
+    }
+
+    @Test
+    public void testAlterReversedTypeViewTable() throws Throwable
+    {
+        createTable("CREATE TABLE %s (" +
+                    "a int," +
+                    "b text," +
+                    "PRIMARY KEY (a, b))");
+
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        createView("mv1", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE a IS NOT NULL AND b IS NOT NULL PRIMARY KEY (a, b) WITH CLUSTERING ORDER BY (b DESC)");
+
+        alterTable("ALTER TABLE %s ALTER b TYPE blob");
+    }
+
+    @Test
+    public void testAlterClusteringViewTable() throws Throwable
+    {
+        createTable("CREATE TABLE %s (" +
+                    "a int," +
+                    "b text," +
+                    "PRIMARY KEY (a))");
+
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        createView("mv1", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE a IS NOT NULL AND b IS NOT NULL PRIMARY KEY (a, b) WITH CLUSTERING ORDER BY (b DESC)");
+
+        alterTable("ALTER TABLE %s ALTER b TYPE blob");
+    }
+
+    @Test
+    public void testAlterViewTableValue() throws Throwable
+    {
+        createTable("CREATE TABLE %s (" +
+                    "a int," +
+                    "b int," +
+                    "PRIMARY KEY (a))");
+
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        createView("mv1", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE a IS NOT NULL AND b IS NOT NULL PRIMARY KEY (a, b) WITH CLUSTERING ORDER BY (b DESC)");
+
+        assertInvalid("ALTER TABLE %s ALTER b TYPE blob");
     }
 }

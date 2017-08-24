@@ -27,6 +27,7 @@ import org.junit.Test;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.gms.Gossiper;
@@ -59,7 +60,7 @@ public class PaxosStateTest
         ColumnFamilyStore cfs = Keyspace.open("PaxosStateTestKeyspace1").getColumnFamilyStore("Standard1");
         String key = "key" + System.nanoTime();
         ByteBuffer value = ByteBufferUtil.bytes(0);
-        RowUpdateBuilder builder = new RowUpdateBuilder(cfs.metadata(), FBUtilities.timestampMicros(), key);
+        RowUpdateBuilder builder = new RowUpdateBuilder(cfs.metadata, FBUtilities.timestampMicros(), key);
         builder.clustering("a").add("val", value);
         PartitionUpdate update = Iterables.getOnlyElement(builder.build().getPartitionUpdates());
 
@@ -78,7 +79,7 @@ public class PaxosStateTest
         assertNoDataPresent(cfs, Util.dk(key));
 
         // Now try again with a ballot created after the truncation
-        long timestamp = SystemKeyspace.getTruncatedAt(update.metadata().id) + 1;
+        long timestamp = SystemKeyspace.getTruncatedAt(update.metadata().cfId) + 1;
         Commit afterTruncate = newProposal(timestamp, update);
         PaxosState.commit(afterTruncate);
         assertDataPresent(cfs, Util.dk(key), "val", value);
@@ -93,7 +94,7 @@ public class PaxosStateTest
     {
         Row row = Util.getOnlyRowUnfiltered(Util.cmd(cfs, key).build());
         assertEquals(0, ByteBufferUtil.compareUnsigned(value,
-                row.getCell(cfs.metadata().getColumn(ByteBufferUtil.bytes(name))).value()));
+                row.getCell(cfs.metadata.getColumnDefinition(ByteBufferUtil.bytes(name))).value()));
     }
 
     private void assertNoDataPresent(ColumnFamilyStore cfs, DecoratedKey key)

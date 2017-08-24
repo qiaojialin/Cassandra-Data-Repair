@@ -26,8 +26,6 @@ import com.google.common.collect.AbstractIterator;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
-
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.*;
 import org.apache.cassandra.dht.RandomPartitioner.BigIntegerToken;
 import org.apache.cassandra.io.util.DataInputBuffer;
@@ -62,7 +60,6 @@ public class MerkleTreesTest
     @BeforeClass
     public static void setUp()
     {
-        DatabaseDescriptor.daemonInitialization();
         StorageService.instance.setPartitionerUnsafe(partitioner);
     }
     @Before

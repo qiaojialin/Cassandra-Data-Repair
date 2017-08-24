@@ -22,11 +22,13 @@ import java.util.*;
 import com.google.common.base.Optional;
 import com.google.common.base.Strings;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Sets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.auth.Permission;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.cql3.CFName;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.IndexName;
@@ -34,18 +36,12 @@ import org.apache.cassandra.db.marshal.MapType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.RequestValidationException;
 import org.apache.cassandra.exceptions.UnauthorizedException;
-import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.Indexes;
-import org.apache.cassandra.schema.MigrationManager;
-import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.service.QueryState;
+import org.apache.cassandra.service.MigrationManager;
+import org.apache.cassandra.thrift.ThriftValidation;
 import org.apache.cassandra.transport.Event;
-
-import static org.apache.cassandra.cql3.statements.RequestValidations.checkFalse;
-import static org.apache.cassandra.cql3.statements.RequestValidations.invalidRequest;
 
 /** A <code>CREATE INDEX</code> statement parsed from a CQL query. */
 public class CreateIndexStatement extends SchemaAlteringStatement
@@ -77,20 +73,20 @@ public class CreateIndexStatement extends SchemaAlteringStatement
 
     public void validate(ClientState state) throws RequestValidationException
     {
-        TableMetadata table = Schema.instance.validateTable(keyspace(), columnFamily());
+        CFMetaData cfm = ThriftValidation.validateColumnFamily(keyspace(), columnFamily());
 
-        if (table.isCounter())
+        if (cfm.isCounter())
             throw new InvalidRequestException("Secondary indexes are not supported on counter tables");
 
-        if (table.isView())
+        if (cfm.isView())
             throw new InvalidRequestException("Secondary indexes are not supported on materialized views");
 
-        if (table.isCompactTable() && !table.isStaticCompactTable())
+        if (cfm.isCompactTable() && !cfm.isStaticCompactTable())
             throw new InvalidRequestException("Secondary indexes are not supported on COMPACT STORAGE tables that have clustering columns");
 
         List<IndexTarget> targets = new ArrayList<>(rawTargets.size());
         for (IndexTarget.Raw rawTarget : rawTargets)
-            targets.add(rawTarget.prepare(table));
+            targets.add(rawTarget.prepare(cfm));
 
         if (targets.isEmpty() && !properties.isCustom)
             throw new InvalidRequestException("Only CUSTOM indexes can be created without specifying a target column");
@@ -100,24 +96,25 @@ public class CreateIndexStatement extends SchemaAlteringStatement
 
         for (IndexTarget target : targets)
         {
-            ColumnMetadata cd = table.getColumn(target.column);
+            ColumnDefinition cd = cfm.getColumnDefinition(target.column);
 
             if (cd == null)
                 throw new InvalidRequestException("No column definition found for column " + target.column);
 
-            if (cd.type.referencesDuration())
-            {
-                checkFalse(cd.type.isCollection(), "Secondary indexes are not supported on collections containing durations");
-                checkFalse(cd.type.isTuple(), "Secondary indexes are not supported on tuples containing durations");
-                checkFalse(cd.type.isUDT(), "Secondary indexes are not supported on UDTs containing durations");
-                throw invalidRequest("Secondary indexes are not supported on duration columns");
-            }
-
             // TODO: we could lift that limitation
-            if (table.isCompactTable() && cd.isPrimaryKeyColumn())
+            if (cfm.isCompactTable() && cd.isPrimaryKeyColumn())
                 throw new InvalidRequestException("Secondary indexes are not supported on PRIMARY KEY columns in COMPACT STORAGE tables");
 
-            if (cd.kind == ColumnMetadata.Kind.PARTITION_KEY && table.partitionKeyColumns().size() == 1)
+            // It would be possible to support 2ndary index on static columns (but not without modifications of at least ExtendedFilter and
+            // CompositesIndex) and maybe we should, but that means a query like:
+            //     SELECT * FROM foo WHERE static_column = 'bar'
+            // would pull the full partition every time the static column of partition is 'bar', which sounds like offering a
+            // fair potential for foot-shooting, so I prefer leaving that to a follow up ticket once we have identified cases where
+            // such indexing is actually useful.
+            if (!cfm.isCompactTable() && cd.isStatic())
+                throw new InvalidRequestException("Secondary indexes are not allowed on static columns");
+
+            if (cd.kind == ColumnDefinition.Kind.PARTITION_KEY && cfm.getKeyValidatorAsClusteringComparator().size() == 1)
                 throw new InvalidRequestException(String.format("Cannot create secondary index on partition key column %s", target.column));
 
             boolean isMap = cd.type instanceof MapType;
@@ -132,13 +129,11 @@ public class CreateIndexStatement extends SchemaAlteringStatement
                 validateIsSimpleIndexIfTargetColumnNotCollection(cd, target);
                 validateTargetColumnIsMapIfIndexInvolvesKeys(isMap, target);
             }
-
-            checkFalse(cd.type.isUDT() && cd.type.isMultiCell(), "Secondary indexes are not supported on non-frozen UDTs");
         }
 
         if (!Strings.isNullOrEmpty(indexName))
         {
-            if (Schema.instance.getKeyspaceMetadata(keyspace()).existingIndexNames(null).contains(indexName))
+            if (Schema.instance.getKSMetaData(keyspace()).existingIndexNames(null).contains(indexName))
             {
                 if (ifNotExists)
                     return;
@@ -164,7 +159,7 @@ public class CreateIndexStatement extends SchemaAlteringStatement
             throw new InvalidRequestException("full() indexes can only be created on frozen collections");
     }
 
-    private void validateIsSimpleIndexIfTargetColumnNotCollection(ColumnMetadata cd, IndexTarget target) throws InvalidRequestException
+    private void validateIsSimpleIndexIfTargetColumnNotCollection(ColumnDefinition cd, IndexTarget target) throws InvalidRequestException
     {
         if (!cd.type.isCollection() && target.type != IndexTarget.Type.SIMPLE)
             throw new InvalidRequestException(String.format("Cannot create %s() index on %s. " +
@@ -187,18 +182,18 @@ public class CreateIndexStatement extends SchemaAlteringStatement
         if (!properties.isCustom)
             throw new InvalidRequestException("Only CUSTOM indexes support multiple columns");
 
-        Set<ColumnIdentifier> columns = Sets.newHashSetWithExpectedSize(targets.size());
+        Set<ColumnIdentifier> columns = new HashSet<>();
         for (IndexTarget target : targets)
             if (!columns.add(target.column))
                 throw new InvalidRequestException("Duplicate column " + target.column + " in index target list");
     }
 
-    public Event.SchemaChange announceMigration(QueryState queryState, boolean isLocalOnly) throws RequestValidationException
+    public Event.SchemaChange announceMigration(boolean isLocalOnly) throws RequestValidationException
     {
-        TableMetadata current = Schema.instance.getTableMetadata(keyspace(), columnFamily());
+        CFMetaData cfm = Schema.instance.getCFMetaData(keyspace(), columnFamily()).copy();
         List<IndexTarget> targets = new ArrayList<>(rawTargets.size());
         for (IndexTarget.Raw rawTarget : rawTargets)
-            targets.add(rawTarget.prepare(current));
+            targets.add(rawTarget.prepare(cfm));
 
         String acceptedName = indexName;
         if (Strings.isNullOrEmpty(acceptedName))
@@ -208,7 +203,7 @@ public class CreateIndexStatement extends SchemaAlteringStatement
                                                          targets.size() == 1 ? targets.get(0).column.toString() : null);
         }
 
-        if (Schema.instance.getKeyspaceMetadata(keyspace()).existingIndexNames(null).contains(acceptedName))
+        if (Schema.instance.getKSMetaData(keyspace()).existingIndexNames(null).contains(acceptedName))
         {
             if (ifNotExists)
                 return null;
@@ -226,31 +221,22 @@ public class CreateIndexStatement extends SchemaAlteringStatement
         else
         {
             indexOptions = Collections.emptyMap();
-            kind = current.isCompound() ? IndexMetadata.Kind.COMPOSITES : IndexMetadata.Kind.KEYS;
+            kind = cfm.isCompound() ? IndexMetadata.Kind.COMPOSITES : IndexMetadata.Kind.KEYS;
         }
 
-        IndexMetadata index = IndexMetadata.fromIndexTargets(targets, acceptedName, kind, indexOptions);
+        IndexMetadata index = IndexMetadata.fromIndexTargets(cfm, targets, acceptedName, kind, indexOptions);
 
         // check to disallow creation of an index which duplicates an existing one in all but name
-        Optional<IndexMetadata> existingIndex = Iterables.tryFind(current.indexes, existing -> existing.equalsWithoutName(index));
+        Optional<IndexMetadata> existingIndex = Iterables.tryFind(cfm.getIndexes(), existing -> existing.equalsWithoutName(index));
         if (existingIndex.isPresent())
-        {
-            if (ifNotExists)
-                return null;
-            else
-                throw new InvalidRequestException(String.format("Index %s is a duplicate of existing index %s",
-                                                                index.name,
-                                                                existingIndex.get().name));
-        }
-
-        TableMetadata updated =
-            current.unbuild()
-                   .indexes(current.indexes.with(index))
-                   .build();
+            throw new InvalidRequestException(String.format("Index %s is a duplicate of existing index %s",
+                                                            index.name,
+                                                            existingIndex.get().name));
 
         logger.trace("Updating index definition for {}", indexName);
+        cfm.indexes(cfm.getIndexes().with(index));
 
-        MigrationManager.announceTableUpdate(updated, isLocalOnly);
+        MigrationManager.announceColumnFamilyUpdate(cfm, false, isLocalOnly);
 
         // Creating an index is akin to updating the CF
         return new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, Event.SchemaChange.Target.TABLE, keyspace(), columnFamily());

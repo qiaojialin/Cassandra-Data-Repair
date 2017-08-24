@@ -25,8 +25,6 @@ import com.google.common.base.Objects;
 import com.google.common.collect.ImmutableMap;
 
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.utils.BloomCalculations;
-
 import static java.lang.String.format;
 
 public final class TableParams
@@ -49,8 +47,7 @@ public final class TableParams
         MIN_INDEX_INTERVAL,
         READ_REPAIR_CHANCE,
         SPECULATIVE_RETRY,
-        CRC_CHECK_CHANCE,
-        CDC;
+        CRC_CHECK_CHANCE;
 
         @Override
         public String toString()
@@ -84,7 +81,6 @@ public final class TableParams
     public final CompactionParams compaction;
     public final CompressionParams compression;
     public final ImmutableMap<String, ByteBuffer> extensions;
-    public final boolean cdc;
 
     private TableParams(Builder builder)
     {
@@ -105,7 +101,6 @@ public final class TableParams
         compaction = builder.compaction;
         compression = builder.compression;
         extensions = builder.extensions;
-        cdc = builder.cdc;
     }
 
     public static Builder builder()
@@ -129,13 +124,7 @@ public final class TableParams
                             .minIndexInterval(params.minIndexInterval)
                             .readRepairChance(params.readRepairChance)
                             .speculativeRetry(params.speculativeRetry)
-                            .extensions(params.extensions)
-                            .cdc(params.cdc);
-    }
-
-    public Builder unbuild()
-    {
-        return builder(this);
+                            .extensions(params.extensions);
     }
 
     public void validate()
@@ -143,12 +132,10 @@ public final class TableParams
         compaction.validate();
         compression.validate();
 
-        double minBloomFilterFpChanceValue = BloomCalculations.minSupportedBloomFilterFpChance();
-        if (bloomFilterFpChance <=  minBloomFilterFpChanceValue || bloomFilterFpChance > 1)
+        if (bloomFilterFpChance <= 0 || bloomFilterFpChance > 1)
         {
-            fail("%s must be larger than %s and less than or equal to 1.0 (got %s)",
+            fail("%s must be larger than 0.0 and less than or equal to 1.0 (got %s)",
                  Option.BLOOM_FILTER_FP_CHANCE,
-                 minBloomFilterFpChanceValue,
                  bloomFilterFpChance);
         }
 
@@ -225,8 +212,7 @@ public final class TableParams
             && caching.equals(p.caching)
             && compaction.equals(p.compaction)
             && compression.equals(p.compression)
-            && extensions.equals(p.extensions)
-            && cdc == p.cdc;
+            && extensions.equals(p.extensions);
     }
 
     @Override
@@ -246,8 +232,7 @@ public final class TableParams
                                 caching,
                                 compaction,
                                 compression,
-                                extensions,
-                                cdc);
+                                extensions);
     }
 
     @Override
@@ -269,7 +254,6 @@ public final class TableParams
                           .add(Option.COMPACTION.toString(), compaction)
                           .add(Option.COMPRESSION.toString(), compression)
                           .add(Option.EXTENSIONS.toString(), extensions)
-                          .add(Option.CDC.toString(), cdc)
                           .toString();
     }
 
@@ -290,7 +274,6 @@ public final class TableParams
         private CompactionParams compaction = CompactionParams.DEFAULT;
         private CompressionParams compression = CompressionParams.DEFAULT;
         private ImmutableMap<String, ByteBuffer> extensions = ImmutableMap.of();
-        private boolean cdc;
 
         public Builder()
         {
@@ -382,12 +365,6 @@ public final class TableParams
         public Builder compression(CompressionParams val)
         {
             compression = val;
-            return this;
-        }
-
-        public Builder cdc(boolean val)
-        {
-            cdc = val;
             return this;
         }
 

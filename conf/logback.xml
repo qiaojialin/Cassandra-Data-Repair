@@ -24,8 +24,7 @@ appender reference in the root level section below.
 
 <configuration scan="true">
   <jmxConfigurator />
-
-  <!-- No shutdown hook; we run it ourselves in StorageService after shutdown -->
+  <shutdownHook class="ch.qos.logback.core.hook.DelayingShutdownHook"/>
 
   <!-- SYSTEMLOG rolling file appender to system.log (INFO level) -->
 
@@ -80,7 +79,7 @@ appender reference in the root level section below.
       <level>INFO</level>
     </filter>
     <encoder>
-      <pattern>%-5level [%thread] %date{ISO8601} %F:%L - %msg%n</pattern>
+      <pattern>%-5level %date{HH:mm:ss,SSS} %msg%n</pattern>
     </encoder>
   </appender>
 
@@ -88,7 +87,7 @@ appender reference in the root level section below.
   <appender name="LogbackMetrics" class="com.codahale.metrics.logback.InstrumentedAppender" />
    -->
 
-  <root level="INFO">
+  <root level="DEBUG">
     <appender-ref ref="SYSTEMLOG" />
     <appender-ref ref="STDOUT" />
     <appender-ref ref="ASYNCDEBUGLOG" /> <!-- Comment this line to disable debug.log -->
@@ -98,4 +97,5 @@ appender reference in the root level section below.
   </root>
 
   <logger name="org.apache.cassandra" level="DEBUG"/>
+  <logger name="com.thinkaurelius.thrift" level="ERROR"/>
 </configuration>

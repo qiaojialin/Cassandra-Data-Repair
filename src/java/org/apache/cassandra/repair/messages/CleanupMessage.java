@@ -18,7 +18,6 @@
 package org.apache.cassandra.repair.messages;
 
 import java.io.IOException;
-import java.util.Objects;
 import java.util.UUID;
 
 import org.apache.cassandra.io.util.DataInputPlus;
@@ -39,22 +38,6 @@ public class CleanupMessage extends RepairMessage
     {
         super(Type.CLEANUP, null);
         this.parentRepairSession = parentRepairSession;
-    }
-
-    @Override
-    public boolean equals(Object o)
-    {
-        if (!(o instanceof CleanupMessage))
-            return false;
-        CleanupMessage other = (CleanupMessage) o;
-        return messageType == other.messageType &&
-               parentRepairSession.equals(other.parentRepairSession);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(messageType, parentRepairSession);
     }
 
     public static class CleanupMessageSerializer implements MessageSerializer<CleanupMessage>

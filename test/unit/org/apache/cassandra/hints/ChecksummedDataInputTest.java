@@ -24,10 +24,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.zip.CRC32;
 
-import org.junit.BeforeClass;
 import org.junit.Test;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.io.util.SequentialWriter;
@@ -40,12 +38,6 @@ import static org.junit.Assert.assertFalse;
 
 public class ChecksummedDataInputTest
 {
-    @BeforeClass
-    public static void setupDD()
-    {
-        DatabaseDescriptor.daemonInitialization();
-    }
-
     @Test
     public void testReadMethods() throws IOException
     {
@@ -85,7 +77,7 @@ public class ChecksummedDataInputTest
         // save the buffer to file to create a RAR
         File file = File.createTempFile("testReadMethods", "1");
         file.deleteOnExit();
-        try (SequentialWriter writer = new SequentialWriter(file))
+        try (SequentialWriter writer = SequentialWriter.open(file))
         {
             writer.write(buffer);
             writer.writeInt((int) crc.getValue());
@@ -119,7 +111,7 @@ public class ChecksummedDataInputTest
 
             // assert that the crc matches, and that we've read exactly as many bytes as expected
             assertTrue(reader.checkCrc());
-            assertTrue(reader.isEOF());
+            assertEquals(0, reader.bytesRemaining());
 
             reader.checkLimit(0);
         }
@@ -160,7 +152,7 @@ public class ChecksummedDataInputTest
         // save the buffer to file to create a RAR
         File file = File.createTempFile("testResetCrc", "1");
         file.deleteOnExit();
-        try (SequentialWriter writer = new SequentialWriter(file))
+        try (SequentialWriter writer = SequentialWriter.open(file))
         {
             writer.write(buffer);
             writer.finish();
@@ -185,7 +177,7 @@ public class ChecksummedDataInputTest
             assertEquals(2.2f, reader.readFloat());
             assertEquals(42, reader.readInt());
             assertTrue(reader.checkCrc());
-            assertTrue(reader.isEOF());
+            assertEquals(0, reader.bytesRemaining());
         }
     }
 
@@ -216,7 +208,7 @@ public class ChecksummedDataInputTest
         // save the buffer to file to create a RAR
         File file = File.createTempFile("testFailedCrc", "1");
         file.deleteOnExit();
-        try (SequentialWriter writer = new SequentialWriter(file))
+        try (SequentialWriter writer = SequentialWriter.open(file))
         {
             writer.write(buffer);
             writer.finish();
@@ -235,7 +227,7 @@ public class ChecksummedDataInputTest
             assertEquals(10, reader.readByte());
             assertEquals('t', reader.readChar());
             assertFalse(reader.checkCrc());
-            assertTrue(reader.isEOF());
+            assertEquals(0, reader.bytesRemaining());
         }
     }
 }

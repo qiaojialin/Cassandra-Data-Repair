@@ -15,13 +15,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.cassandra.schema;
 
-import java.util.HashMap;
+
 import java.util.Iterator;
-import java.util.Map;
 import java.util.Optional;
-import java.util.UUID;
 
 import javax.annotation.Nullable;
 
@@ -30,11 +29,14 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.MapDifference;
 import com.google.common.collect.Maps;
 
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.ViewDefinition;
+
 import static com.google.common.collect.Iterables.filter;
 
-public final class Views implements Iterable<ViewMetadata>
+public final class Views implements Iterable<ViewDefinition>
 {
-    private final ImmutableMap<String, ViewMetadata> views;
+    private final ImmutableMap<String, ViewDefinition> views;
 
     private Views(Builder builder)
     {
@@ -51,12 +53,12 @@ public final class Views implements Iterable<ViewMetadata>
         return builder().build();
     }
 
-    public Iterator<ViewMetadata> iterator()
+    public Iterator<ViewDefinition> iterator()
     {
         return views.values().iterator();
     }
 
-    public Iterable<TableMetadata> metadatas()
+    public Iterable<CFMetaData> metadatas()
     {
         return Iterables.transform(views.values(), view -> view.metadata);
     }
@@ -71,18 +73,13 @@ public final class Views implements Iterable<ViewMetadata>
         return views.isEmpty();
     }
 
-    public Iterable<ViewMetadata> forTable(UUID tableId)
-    {
-        return Iterables.filter(this, v -> v.baseTableId.asUUID().equals(tableId));
-    }
-
     /**
      * Get the materialized view with the specified name
      *
      * @param name a non-qualified materialized view name
-     * @return an empty {@link Optional} if the materialized view name is not found; a non-empty optional of {@link ViewMetadata} otherwise
+     * @return an empty {@link Optional} if the materialized view name is not found; a non-empty optional of {@link ViewDefinition} otherwise
      */
-    public Optional<ViewMetadata> get(String name)
+    public Optional<ViewDefinition> get(String name)
     {
         return Optional.ofNullable(views.get(name));
     }
@@ -91,10 +88,10 @@ public final class Views implements Iterable<ViewMetadata>
      * Get the view with the specified name
      *
      * @param name a non-qualified view name
-     * @return null if the view name is not found; the found {@link ViewMetadata} otherwise
+     * @return null if the view name is not found; the found {@link ViewDefinition} otherwise
      */
     @Nullable
-    public ViewMetadata getNullable(String name)
+    public ViewDefinition getNullable(String name)
     {
         return views.get(name);
     }
@@ -102,17 +99,12 @@ public final class Views implements Iterable<ViewMetadata>
     /**
      * Create a MaterializedViews instance with the provided materialized view added
      */
-    public Views with(ViewMetadata view)
+    public Views with(ViewDefinition view)
     {
-        if (get(view.name).isPresent())
-            throw new IllegalStateException(String.format("Materialized View %s already exists", view.name));
+        if (get(view.viewName).isPresent())
+            throw new IllegalStateException(String.format("Materialized View %s already exists", view.viewName));
 
         return builder().add(this).add(view).build();
-    }
-
-    public Views withSwapped(ViewMetadata view)
-    {
-        return without(view.name).with(view);
     }
 
     /**
@@ -120,21 +112,23 @@ public final class Views implements Iterable<ViewMetadata>
      */
     public Views without(String name)
     {
-        ViewMetadata materializedView =
+        ViewDefinition materializedView =
             get(name).orElseThrow(() -> new IllegalStateException(String.format("Materialized View %s doesn't exists", name)));
 
         return builder().add(filter(this, v -> v != materializedView)).build();
     }
 
-    MapDifference<TableId, ViewMetadata> diff(Views other)
+    /**
+     * Creates a MaterializedViews instance which contains an updated materialized view
+     */
+    public Views replace(ViewDefinition view, CFMetaData cfm)
     {
-        Map<TableId, ViewMetadata> thisViews = new HashMap<>();
-        this.forEach(v -> thisViews.put(v.metadata.id, v));
+        return without(view.viewName).with(view);
+    }
 
-        Map<TableId, ViewMetadata> otherViews = new HashMap<>();
-        other.forEach(v -> otherViews.put(v.metadata.id, v));
-
-        return Maps.difference(thisViews, otherViews);
+    MapDifference<String, ViewDefinition> diff(Views other)
+    {
+        return Maps.difference(views, other.views);
     }
 
     @Override
@@ -157,7 +151,7 @@ public final class Views implements Iterable<ViewMetadata>
 
     public static final class Builder
     {
-        final ImmutableMap.Builder<String, ViewMetadata> views = new ImmutableMap.Builder<>();
+        final ImmutableMap.Builder<String, ViewDefinition> views = new ImmutableMap.Builder<>();
 
         private Builder()
         {
@@ -169,13 +163,13 @@ public final class Views implements Iterable<ViewMetadata>
         }
 
 
-        public Builder add(ViewMetadata view)
+        public Builder add(ViewDefinition view)
         {
-            views.put(view.name, view);
+            views.put(view.viewName, view);
             return this;
         }
 
-        public Builder add(Iterable<ViewMetadata> views)
+        public Builder add(Iterable<ViewDefinition> views)
         {
             views.forEach(this::add);
             return this;

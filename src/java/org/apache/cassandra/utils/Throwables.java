@@ -22,7 +22,6 @@ import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Iterator;
-import java.util.Optional;
 import java.util.stream.Stream;
 
 import org.apache.cassandra.io.FSReadError;
@@ -167,18 +166,5 @@ public final class Throwables
             }
         }
         return accumulate;
-    }
-
-    public static Optional<IOException> extractIOExceptionCause(Throwable t)
-    {
-        if (t instanceof IOException)
-            return Optional.of((IOException) t);
-        Throwable cause = t;
-        while ((cause = cause.getCause()) != null)
-        {
-            if (cause instanceof IOException)
-                return Optional.of((IOException) cause);
-        }
-        return Optional.empty();
     }
 }

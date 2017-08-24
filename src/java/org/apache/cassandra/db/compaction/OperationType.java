@@ -36,10 +36,7 @@ public enum OperationType
     FLUSH("Flush"),
     STREAM("Stream"),
     WRITE("Write"),
-    VIEW_BUILD("View build"),
-    INDEX_SUMMARY("Index summary redistribution"),
-    RELOCATE("Relocate sstables to correct disk"),
-    GARBAGE_COLLECT("Remove deleted data");
+    VIEW_BUILD("View build");
 
     public final String type;
     public final String fileName;

@@ -21,15 +21,12 @@ import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
 
-import com.datastax.driver.core.Cluster;
 import com.datastax.driver.core.Host;
 import com.datastax.driver.core.Metadata;
 import com.datastax.driver.core.ResultSet;
 import com.datastax.driver.core.Row;
 import com.datastax.driver.core.Session;
 import com.datastax.driver.core.TokenRange;
-
-import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.mapred.InputSplit;
 import org.apache.hadoop.mapred.JobConf;
@@ -40,12 +37,12 @@ import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.hadoop.mapreduce.TaskAttemptID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.dht.*;
+import org.apache.cassandra.thrift.KeyRange;
 import org.apache.cassandra.hadoop.*;
-import org.apache.cassandra.utils.*;
 
-import static java.util.stream.Collectors.toMap;
 
 /**
  * Hadoop InputFormat allowing map/reduce against Cassandra rows within one ColumnFamily.
@@ -56,12 +53,10 @@ import static java.util.stream.Collectors.toMap;
  *   ConfigHelper.setInputColumnFamily
  *
  * You can also configure the number of rows per InputSplit with
- *   1: ConfigHelper.setInputSplitSize. The default split size is 64k rows.
- *   or
- *   2: ConfigHelper.setInputSplitSizeInMb. InputSplit size in MB with new, more precise method
- *   If no value is provided for InputSplitSizeInMb, we default to using InputSplitSize.
+ *   ConfigHelper.setInputSplitSize. The default split size is 64k rows.
  *
- *   CQLConfigHelper.setInputCQLPageRowSize. The default page row size is 1000. You
+ *   the number of CQL rows per page
+ *   CQLConfigHelper.setInputCQLPageRowSize. The default page row size is 1000. You 
  *   should set it to "as big as possible, but no bigger." It set the LIMIT for the CQL 
  *   query, so you need set it big enough to minimize the network overhead, and also
  *   not too big to avoid out of memory issue.
@@ -75,6 +70,7 @@ public class CqlInputFormat extends org.apache.hadoop.mapreduce.InputFormat<Long
     private String keyspace;
     private String cfName;
     private IPartitioner partitioner;
+    private Session session;
 
     public RecordReader<Long, Row> getRecordReader(InputSplit split, JobConf jobConf, final Reporter reporter)
             throws IOException
@@ -125,33 +121,51 @@ public class CqlInputFormat extends org.apache.hadoop.mapreduce.InputFormat<Long
         partitioner = ConfigHelper.getInputPartitioner(conf);
         logger.trace("partitioner is {}", partitioner);
 
+        // canonical ranges and nodes holding replicas
+        Map<TokenRange, Set<Host>> masterRangeNodes = getRangeMap(conf, keyspace);
+
         // canonical ranges, split into pieces, fetching the splits in parallel
         ExecutorService executor = new ThreadPoolExecutor(0, 128, 60L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>());
         List<org.apache.hadoop.mapreduce.InputSplit> splits = new ArrayList<>();
 
-        try (Cluster cluster = CqlConfigHelper.getInputCluster(ConfigHelper.getInputInitialAddress(conf).split(","), conf);
-             Session session = cluster.connect())
+        try
         {
             List<Future<List<org.apache.hadoop.mapreduce.InputSplit>>> splitfutures = new ArrayList<>();
-            Pair<String, String> jobKeyRange = ConfigHelper.getInputKeyRange(conf);
+            KeyRange jobKeyRange = ConfigHelper.getInputKeyRange(conf);
             Range<Token> jobRange = null;
             if (jobKeyRange != null)
             {
-                jobRange = new Range<>(partitioner.getTokenFactory().fromString(jobKeyRange.left),
-                                       partitioner.getTokenFactory().fromString(jobKeyRange.right));
+                if (jobKeyRange.start_key != null)
+                {
+                    if (!partitioner.preservesOrder())
+                        throw new UnsupportedOperationException("KeyRange based on keys can only be used with a order preserving partitioner");
+                    if (jobKeyRange.start_token != null)
+                        throw new IllegalArgumentException("only start_key supported");
+                    if (jobKeyRange.end_token != null)
+                        throw new IllegalArgumentException("only start_key supported");
+                    jobRange = new Range<>(partitioner.getToken(jobKeyRange.start_key),
+                                           partitioner.getToken(jobKeyRange.end_key));
+                }
+                else if (jobKeyRange.start_token != null)
+                {
+                    jobRange = new Range<>(partitioner.getTokenFactory().fromString(jobKeyRange.start_token),
+                                           partitioner.getTokenFactory().fromString(jobKeyRange.end_token));
+                }
+                else
+                {
+                    logger.warn("ignoring jobKeyRange specified without start_key or start_token");
+                }
             }
 
-            Metadata metadata = cluster.getMetadata();
-
-            // canonical ranges and nodes holding replicas
-            Map<TokenRange, Set<Host>> masterRangeNodes = getRangeMap(keyspace, metadata);
+            session = CqlConfigHelper.getInputCluster(ConfigHelper.getInputInitialAddress(conf).split(","), conf).connect();
+            Metadata metadata = session.getCluster().getMetadata();
 
             for (TokenRange range : masterRangeNodes.keySet())
             {
                 if (jobRange == null)
                 {
                     // for each tokenRange, pick a live owner and ask it to compute bite-sized splits
-                    splitfutures.add(executor.submit(new SplitCallable(range, masterRangeNodes.get(range), conf, session)));
+                    splitfutures.add(executor.submit(new SplitCallable(range, masterRangeNodes.get(range), conf)));
                 }
                 else
                 {
@@ -161,7 +175,7 @@ public class CqlInputFormat extends org.apache.hadoop.mapreduce.InputFormat<Long
                         for (TokenRange intersection: range.intersectWith(jobTokenRange))
                         {
                             // for each tokenRange, pick a live owner and ask it to compute bite-sized splits
-                            splitfutures.add(executor.submit(new SplitCallable(intersection,  masterRangeNodes.get(range), conf, session)));
+                            splitfutures.add(executor.submit(new SplitCallable(intersection,  masterRangeNodes.get(range), conf)));
                         }
                     }
                 }
@@ -196,13 +210,12 @@ public class CqlInputFormat extends org.apache.hadoop.mapreduce.InputFormat<Long
                 metadata.newToken(partitioner.getTokenFactory().toString(range.right)));
     }
 
-    private Map<TokenRange, Long> getSubSplits(String keyspace, String cfName, TokenRange range, Configuration conf, Session session)
+    private Map<TokenRange, Long> getSubSplits(String keyspace, String cfName, TokenRange range, Configuration conf) throws IOException
     {
         int splitSize = ConfigHelper.getInputSplitSize(conf);
-        int splitSizeMb = ConfigHelper.getInputSplitSizeInMb(conf);
         try
         {
-            return describeSplits(keyspace, cfName, range, splitSize, splitSizeMb, session);
+            return describeSplits(keyspace, cfName, range, splitSize);
         }
         catch (Exception e)
         {
@@ -210,19 +223,24 @@ public class CqlInputFormat extends org.apache.hadoop.mapreduce.InputFormat<Long
         }
     }
 
-    private Map<TokenRange, Set<Host>> getRangeMap(String keyspace, Metadata metadata)
+    private Map<TokenRange, Set<Host>> getRangeMap(Configuration conf, String keyspace)
     {
-        return metadata.getTokenRanges()
-                       .stream()
-                       .collect(toMap(p -> p, p -> metadata.getReplicas('"' + keyspace + '"', p)));
+        try (Session session = CqlConfigHelper.getInputCluster(ConfigHelper.getInputInitialAddress(conf).split(","), conf).connect())
+        {
+            Map<TokenRange, Set<Host>> map = new HashMap<>();
+            Metadata metadata = session.getCluster().getMetadata();
+            for (TokenRange tokenRange : metadata.getTokenRanges())
+                map.put(tokenRange, metadata.getReplicas('"' + keyspace + '"', tokenRange));
+            return map;
+        }
     }
 
-    private Map<TokenRange, Long> describeSplits(String keyspace, String table, TokenRange tokenRange, int splitSize, int splitSizeMb, Session session)
+    private Map<TokenRange, Long> describeSplits(String keyspace, String table, TokenRange tokenRange, int splitSize)
     {
         String query = String.format("SELECT mean_partition_size, partitions_count " +
                                      "FROM %s.%s " +
                                      "WHERE keyspace_name = ? AND table_name = ? AND range_start = ? AND range_end = ?",
-                                     SchemaConstants.SYSTEM_KEYSPACE_NAME,
+                                     SystemKeyspace.NAME,
                                      SystemKeyspace.SIZE_ESTIMATES);
 
         ResultSet resultSet = session.execute(query, keyspace, table, tokenRange.getStart().toString(), tokenRange.getEnd().toString());
@@ -238,9 +256,7 @@ public class CqlInputFormat extends org.apache.hadoop.mapreduce.InputFormat<Long
             meanPartitionSize = row.getLong("mean_partition_size");
             partitionCount = row.getLong("partitions_count");
 
-            splitCount = splitSizeMb > 0
-                ? (int)(meanPartitionSize * partitionCount / splitSizeMb / 1024 / 1024)
-                : (int)(partitionCount / splitSize);
+            splitCount = (int)((meanPartitionSize * partitionCount) / splitSize);
         }
 
         // If we have no data on this split or the size estimate is 0,
@@ -282,21 +298,19 @@ public class CqlInputFormat extends org.apache.hadoop.mapreduce.InputFormat<Long
         private final TokenRange tokenRange;
         private final Set<Host> hosts;
         private final Configuration conf;
-        private final Session session;
 
-        public SplitCallable(TokenRange tr, Set<Host> hosts, Configuration conf, Session session)
+        public SplitCallable(TokenRange tr, Set<Host> hosts, Configuration conf)
         {
             this.tokenRange = tr;
             this.hosts = hosts;
             this.conf = conf;
-            this.session = session;
         }
 
         public List<org.apache.hadoop.mapreduce.InputSplit> call() throws Exception
         {
             ArrayList<org.apache.hadoop.mapreduce.InputSplit> splits = new ArrayList<>();
             Map<TokenRange, Long> subSplits;
-            subSplits = getSubSplits(keyspace, cfName, tokenRange, conf, session);
+            subSplits = getSubSplits(keyspace, cfName, tokenRange, conf);
             // turn the sub-ranges into InputSplits
             String[] endpoints = new String[hosts.size()];
 
@@ -307,9 +321,9 @@ public class CqlInputFormat extends org.apache.hadoop.mapreduce.InputFormat<Long
 
             boolean partitionerIsOpp = partitioner instanceof OrderPreservingPartitioner || partitioner instanceof ByteOrderedPartitioner;
 
-            for (Map.Entry<TokenRange, Long> subSplitEntry : subSplits.entrySet())
+            for (TokenRange subSplit : subSplits.keySet())
             {
-                List<TokenRange> ranges = subSplitEntry.getKey().unwrap();
+                List<TokenRange> ranges = subSplit.unwrap();
                 for (TokenRange subrange : ranges)
                 {
                     ColumnFamilySplit split =
@@ -318,7 +332,7 @@ public class CqlInputFormat extends org.apache.hadoop.mapreduce.InputFormat<Long
                                             subrange.getStart().toString().substring(2) : subrange.getStart().toString(),
                                     partitionerIsOpp ?
                                             subrange.getEnd().toString().substring(2) : subrange.getEnd().toString(),
-                                    subSplitEntry.getValue(),
+                                    subSplits.get(subSplit),
                                     endpoints);
 
                     logger.trace("adding {}", split);

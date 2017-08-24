@@ -74,7 +74,7 @@ public class CassandraMetricsRegistry extends MetricRegistry
 
     public Histogram histogram(MetricName name, boolean considerZeroes)
     {
-        Histogram histogram = register(name, new ClearableHistogram(new DecayingEstimatedHistogramReservoir(considerZeroes)));
+        Histogram histogram = register(name, new ClearableHistogram(new EstimatedHistogramReservoir(considerZeroes)));
         registerMBean(histogram, name.getMBeanName());
 
         return histogram;
@@ -89,7 +89,7 @@ public class CassandraMetricsRegistry extends MetricRegistry
 
     public Timer timer(MetricName name)
     {
-        Timer timer = register(name, new Timer(new DecayingEstimatedHistogramReservoir()));
+        Timer timer = register(name, new Timer(new EstimatedHistogramReservoir(false)));
         registerMBean(timer, name.getMBeanName());
 
         return timer;
@@ -190,18 +190,6 @@ public class CassandraMetricsRegistry extends MetricRegistry
         {
             mBeanServer.unregisterMBean(name.getMBeanName());
         } catch (Exception ignore) {}
-    }
-    
-    /**
-     * Strips a single final '$' from input
-     * 
-     * @param s String to strip
-     * @return a string with one less '$' at end
-     */
-    private static String withoutFinalDollar(String s)
-    {
-        int l = s.length();
-        return (l!=0 && '$' == s.charAt(l-1))?s.substring(0,l-1):s;
     }
 
     public interface MetricMBean
@@ -613,7 +601,7 @@ public class CassandraMetricsRegistry extends MetricRegistry
         public MetricName(Class<?> klass, String name, String scope)
         {
             this(klass.getPackage() == null ? "" : klass.getPackage().getName(),
-                    withoutFinalDollar(klass.getSimpleName()),
+                    klass.getSimpleName().replaceAll("\\$$", ""),
                     name,
                     scope);
         }
@@ -823,7 +811,7 @@ public class CassandraMetricsRegistry extends MetricRegistry
         {
             if (type == null || type.isEmpty())
             {
-                type = withoutFinalDollar(klass.getSimpleName());
+                type = klass.getSimpleName().replaceAll("\\$$", "");
             }
             return type;
         }

@@ -22,15 +22,15 @@ import java.io.IOException;
 import java.security.MessageDigest;
 import java.util.*;
 
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.transform.FilteredPartitions;
-import org.apache.cassandra.db.transform.MorePartitions;
 import org.apache.cassandra.db.transform.Transformation;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.MergeIterator;
 
 /**
@@ -77,25 +77,6 @@ public abstract class UnfilteredPartitionIterators
         return Transformation.apply(toReturn, new Close());
     }
 
-    public static UnfilteredPartitionIterator concat(final List<UnfilteredPartitionIterator> iterators)
-    {
-        if (iterators.size() == 1)
-            return iterators.get(0);
-
-        class Extend implements MorePartitions<UnfilteredPartitionIterator>
-        {
-            int i = 1;
-            public UnfilteredPartitionIterator moreContents()
-            {
-                if (i >= iterators.size())
-                    return null;
-                return iterators.get(i++);
-            }
-        }
-        return MorePartitions.extend(iterators.get(0), new Extend());
-    }
-
-
     public static PartitionIterator mergeAndFilter(List<UnfilteredPartitionIterator> iterators, int nowInSec, MergeListener listener)
     {
         // TODO: we could have a somewhat faster version if we were to merge the UnfilteredRowIterators directly as RowIterators
@@ -112,7 +93,8 @@ public abstract class UnfilteredPartitionIterators
         assert listener != null;
         assert !iterators.isEmpty();
 
-        final TableMetadata metadata = iterators.get(0).metadata();
+        final boolean isForThrift = iterators.get(0).isForThrift();
+        final CFMetaData metadata = iterators.get(0).metadata();
 
         final MergeIterator<UnfilteredRowIterator, UnfilteredRowIterator> merged = MergeIterator.get(iterators, partitionComparator, new MergeIterator.Reducer<UnfilteredRowIterator, UnfilteredRowIterator>()
         {
@@ -153,7 +135,12 @@ public abstract class UnfilteredPartitionIterators
 
         return new AbstractUnfilteredPartitionIterator()
         {
-            public TableMetadata metadata()
+            public boolean isForThrift()
+            {
+                return isForThrift;
+            }
+
+            public CFMetaData metadata()
             {
                 return metadata;
             }
@@ -172,7 +159,6 @@ public abstract class UnfilteredPartitionIterators
             public void close()
             {
                 merged.close();
-                listener.close();
             }
         };
     }
@@ -184,11 +170,18 @@ public abstract class UnfilteredPartitionIterators
         if (iterators.size() == 1)
             return iterators.get(0);
 
-        final TableMetadata metadata = iterators.get(0).metadata();
+        final boolean isForThrift = iterators.get(0).isForThrift();
+        final CFMetaData metadata = iterators.get(0).metadata();
 
         final MergeIterator<UnfilteredRowIterator, UnfilteredRowIterator> merged = MergeIterator.get(iterators, partitionComparator, new MergeIterator.Reducer<UnfilteredRowIterator, UnfilteredRowIterator>()
         {
             private final List<UnfilteredRowIterator> toMerge = new ArrayList<>(iterators.size());
+
+            @Override
+            public boolean trivialReduceIsTrivial()
+            {
+                return false;
+            }
 
             public void reduce(int idx, UnfilteredRowIterator current)
             {
@@ -214,7 +207,12 @@ public abstract class UnfilteredPartitionIterators
 
         return new AbstractUnfilteredPartitionIterator()
         {
-            public TableMetadata metadata()
+            public boolean isForThrift()
+            {
+                return isForThrift;
+            }
+
+            public CFMetaData metadata()
             {
                 return metadata;
             }
@@ -289,9 +287,9 @@ public abstract class UnfilteredPartitionIterators
     {
         public void serialize(UnfilteredPartitionIterator iter, ColumnFilter selection, DataOutputPlus out, int version) throws IOException
         {
-            // Previously, a boolean indicating if this was for a thrift query.
-            // Unused since 4.0 but kept on wire for compatibility.
-            out.writeBoolean(false);
+            assert version >= MessagingService.VERSION_30; // We handle backward compatibility directy in ReadResponse.LegacyRangeSliceReplySerializer
+
+            out.writeBoolean(iter.isForThrift());
             while (iter.hasNext())
             {
                 out.writeBoolean(true);
@@ -303,10 +301,10 @@ public abstract class UnfilteredPartitionIterators
             out.writeBoolean(false);
         }
 
-        public UnfilteredPartitionIterator deserialize(final DataInputPlus in, final int version, final TableMetadata metadata, final ColumnFilter selection, final SerializationHelper.Flag flag) throws IOException
+        public UnfilteredPartitionIterator deserialize(final DataInputPlus in, final int version, final CFMetaData metadata, final ColumnFilter selection, final SerializationHelper.Flag flag) throws IOException
         {
-            // Skip now unused isForThrift boolean
-            in.readBoolean();
+            assert version >= MessagingService.VERSION_30; // We handle backward compatibility directy in ReadResponse.LegacyRangeSliceReplySerializer
+            final boolean isForThrift = in.readBoolean();
 
             return new AbstractUnfilteredPartitionIterator()
             {
@@ -314,7 +312,12 @@ public abstract class UnfilteredPartitionIterators
                 private boolean hasNext;
                 private boolean nextReturned = true;
 
-                public TableMetadata metadata()
+                public boolean isForThrift()
+                {
+                    return isForThrift;
+                }
+
+                public CFMetaData metadata()
                 {
                     return metadata;
                 }

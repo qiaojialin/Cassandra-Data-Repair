@@ -18,6 +18,7 @@
 package org.apache.cassandra.db.commitlog;
 
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
@@ -25,7 +26,7 @@ import java.nio.channels.FileChannel;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.utils.NativeLibrary;
+import org.apache.cassandra.utils.CLibrary;
 import org.apache.cassandra.utils.SyncUtil;
 
 /*
@@ -38,11 +39,12 @@ public class MemoryMappedSegment extends CommitLogSegment
     /**
      * Constructs a new segment file.
      *
+     * @param filePath  if not null, recycles the existing file by renaming it and truncating it to CommitLog.SEGMENT_SIZE.
      * @param commitLog the commit log it will be used with.
      */
-    MemoryMappedSegment(CommitLog commitLog, AbstractCommitLogSegmentManager manager)
+    MemoryMappedSegment(CommitLog commitLog)
     {
-        super(commitLog, manager);
+        super(commitLog);
         // mark the initial sync marker as uninitialised
         int firstSync = buffer.position();
         buffer.putInt(firstSync + 0, 0);
@@ -53,9 +55,21 @@ public class MemoryMappedSegment extends CommitLogSegment
     {
         try
         {
-            MappedByteBuffer mappedFile = channel.map(FileChannel.MapMode.READ_WRITE, 0, DatabaseDescriptor.getCommitLogSegmentSize());
-            manager.addSize(DatabaseDescriptor.getCommitLogSegmentSize());
-            return mappedFile;
+            // Extend the file size to the standard segment size.
+            // NOTE: while we're using RAF to easily adjust file size, we need to avoid using RAF
+            // for grabbing the FileChannel due to FILE_SHARE_DELETE flag bug on windows.
+            // See: https://bugs.openjdk.java.net/browse/JDK-6357433 and CASSANDRA-8308
+            try (RandomAccessFile raf = new RandomAccessFile(logFile, "rw"))
+            {
+                raf.setLength(DatabaseDescriptor.getCommitLogSegmentSize());
+            }
+            catch (IOException e)
+            {
+                throw new FSWriteError(e, logFile);
+            }
+            commitLog.allocator.addSize(DatabaseDescriptor.getCommitLogSegmentSize());
+
+            return channel.map(FileChannel.MapMode.READ_WRITE, 0, DatabaseDescriptor.getCommitLogSegmentSize());
         }
         catch (IOException e)
         {
@@ -78,15 +92,14 @@ public class MemoryMappedSegment extends CommitLogSegment
         // we don't chain the crcs here to ensure this method is idempotent if it fails
         writeSyncMarker(buffer, startMarker, startMarker, nextMarker);
 
-        try
-        {
+        try {
             SyncUtil.force((MappedByteBuffer) buffer);
         }
         catch (Exception e) // MappedByteBuffer.force() does not declare IOException but can actually throw it
         {
             throw new FSWriteError(e, getPath());
         }
-        NativeLibrary.trySkipCache(fd, startMarker, nextMarker, logFile.getAbsolutePath());
+        CLibrary.trySkipCache(fd, startMarker, nextMarker, logFile.getAbsolutePath());
     }
 
     @Override
@@ -98,7 +111,7 @@ public class MemoryMappedSegment extends CommitLogSegment
     @Override
     protected void internalClose()
     {
-        if (FileUtils.isCleanerAvailable)
+        if (FileUtils.isCleanerAvailable())
             FileUtils.clean(buffer);
         super.internalClose();
     }

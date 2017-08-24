@@ -41,7 +41,7 @@ public abstract class AuthenticationStatement extends ParsedStatement implements
         return 0;
     }
 
-    public ResultMessage execute(QueryState state, QueryOptions options, long queryStartNanoTime)
+    public ResultMessage execute(QueryState state, QueryOptions options)
     throws RequestExecutionException, RequestValidationException
     {
         return execute(state.getClientState());

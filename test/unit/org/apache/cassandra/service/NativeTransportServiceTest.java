@@ -25,7 +25,6 @@ import java.util.stream.IntStream;
 
 import com.google.common.collect.Sets;
 import org.junit.After;
-import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -38,11 +37,6 @@ import static org.junit.Assert.assertTrue;
 
 public class NativeTransportServiceTest
 {
-    @BeforeClass
-    public static void setupDD()
-    {
-        DatabaseDescriptor.daemonInitialization();
-    }
 
     @After
     public void resetConfig()

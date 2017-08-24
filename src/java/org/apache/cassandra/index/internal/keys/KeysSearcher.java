@@ -22,15 +22,15 @@ import java.nio.ByteBuffer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.filter.RowFilter;
+import org.apache.cassandra.db.partitions.ImmutableBTreePartition;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.index.internal.CassandraIndex;
 import org.apache.cassandra.index.internal.CassandraIndexSearcher;
-import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 
 public class KeysSearcher extends CassandraIndexSearcher
@@ -47,7 +47,7 @@ public class KeysSearcher extends CassandraIndexSearcher
     protected UnfilteredPartitionIterator queryDataFromIndex(final DecoratedKey indexKey,
                                                              final RowIterator indexHits,
                                                              final ReadCommand command,
-                                                             final ReadExecutionController executionController)
+                                                             final ReadOrderGroup orderGroup)
     {
         assert indexHits.staticRow() == Rows.EMPTY_STATIC_ROW;
 
@@ -55,7 +55,12 @@ public class KeysSearcher extends CassandraIndexSearcher
         {
             private UnfilteredRowIterator next;
 
-            public TableMetadata metadata()
+            public boolean isForThrift()
+            {
+                return command.isForThrift();
+            }
+
+            public CFMetaData metadata()
             {
                 return command.metadata();
             }
@@ -81,13 +86,11 @@ public class KeysSearcher extends CassandraIndexSearcher
                 {
                     Row hit = indexHits.next();
                     DecoratedKey key = index.baseCfs.decorateKey(hit.clustering().get(0));
-                    if (!command.selectsKey(key))
-                        continue;
 
-                    ColumnFilter extendedFilter = getExtendedFilter(command.columnFilter());
-                    SinglePartitionReadCommand dataCmd = SinglePartitionReadCommand.create(index.baseCfs.metadata(),
+                    SinglePartitionReadCommand dataCmd = SinglePartitionReadCommand.create(isForThrift(),
+                                                                                           index.baseCfs.metadata,
                                                                                            command.nowInSec(),
-                                                                                           extendedFilter,
+                                                                                           command.columnFilter(),
                                                                                            command.rowFilter(),
                                                                                            DataLimits.NONE,
                                                                                            key,
@@ -96,10 +99,12 @@ public class KeysSearcher extends CassandraIndexSearcher
                     @SuppressWarnings("resource") // filterIfStale closes it's iterator if either it materialize it or if it returns null.
                                                   // Otherwise, we close right away if empty, and if it's assigned to next it will be called either
                                                   // by the next caller of next, or through closing this iterator is this come before.
-                    UnfilteredRowIterator dataIter = filterIfStale(dataCmd.queryMemtableAndDisk(index.baseCfs, executionController),
+                    UnfilteredRowIterator dataIter = filterIfStale(dataCmd.queryMemtableAndDisk(index.baseCfs,
+                                                                                                orderGroup.baseReadOpOrderGroup()),
                                                                    hit,
                                                                    indexKey.getKey(),
-                                                                   executionController.writeOpOrderGroup(),
+                                                                   orderGroup.writeOpOrderGroup(),
+                                                                   isForThrift(),
                                                                    command.nowInSec());
 
                     if (dataIter != null)
@@ -127,38 +132,57 @@ public class KeysSearcher extends CassandraIndexSearcher
         };
     }
 
-    private ColumnFilter getExtendedFilter(ColumnFilter initialFilter)
-    {
-        if (command.columnFilter().fetches(index.getIndexedColumn()))
-            return initialFilter;
-
-        ColumnFilter.Builder builder = ColumnFilter.selectionBuilder();
-        builder.addAll(initialFilter.fetchedColumns());
-        builder.add(index.getIndexedColumn());
-        return builder.build();
-    }
-
     private UnfilteredRowIterator filterIfStale(UnfilteredRowIterator iterator,
                                                 Row indexHit,
                                                 ByteBuffer indexedValue,
                                                 OpOrder.Group writeOp,
+                                                boolean isForThrift,
                                                 int nowInSec)
     {
-        assert iterator.metadata().isCompactTable();
-        Row data = iterator.staticRow();
-        if (index.isStale(data, indexedValue, nowInSec))
+        if (isForThrift)
         {
-            // Index is stale, remove the index entry and ignore
-            index.deleteStaleEntry(index.getIndexCfs().decorateKey(indexedValue),
-                    makeIndexClustering(iterator.partitionKey().getKey(), Clustering.EMPTY),
-                    new DeletionTime(indexHit.primaryKeyLivenessInfo().timestamp(), nowInSec),
-                    writeOp);
+            // The data we got has gone though ThrifResultsMerger, so we're looking for the row whose clustering
+            // is the indexed name. Ans so we need to materialize the partition.
+            ImmutableBTreePartition result = ImmutableBTreePartition.create(iterator);
             iterator.close();
-            return null;
+            Row data = result.getRow(new Clustering(index.getIndexedColumn().name.bytes));
+
+            // for thrift tables, we need to compare the index entry against the compact value column,
+            // not the column actually designated as the indexed column so we don't use the index function
+            // lib for the staleness check like we do in every other case
+            Cell baseData = data.getCell(index.baseCfs.metadata.compactValueColumn());
+            if (baseData == null || !baseData.isLive(nowInSec) || index.getIndexedColumn().type.compare(indexedValue, baseData.value()) != 0)
+            {
+                // Index is stale, remove the index entry and ignore
+                index.deleteStaleEntry(index.getIndexCfs().decorateKey(indexedValue),
+                                         new Clustering(index.getIndexedColumn().name.bytes),
+                                         new DeletionTime(indexHit.primaryKeyLivenessInfo().timestamp(), nowInSec),
+                                         writeOp);
+                return null;
+            }
+            else
+            {
+                return result.unfilteredIterator();
+            }
         }
         else
         {
-            return iterator;
+            assert iterator.metadata().isCompactTable();
+            Row data = iterator.staticRow();
+            if (index.isStale(data, indexedValue, nowInSec))
+            {
+                // Index is stale, remove the index entry and ignore
+                index.deleteStaleEntry(index.getIndexCfs().decorateKey(indexedValue),
+                                         makeIndexClustering(iterator.partitionKey().getKey(), Clustering.EMPTY),
+                                         new DeletionTime(indexHit.primaryKeyLivenessInfo().timestamp(), nowInSec),
+                                         writeOp);
+                iterator.close();
+                return null;
+            }
+            else
+            {
+                return iterator;
+            }
         }
     }
 }

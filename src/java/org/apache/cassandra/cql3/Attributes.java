@@ -18,10 +18,11 @@
 package org.apache.cassandra.cql3;
 
 import java.nio.ByteBuffer;
-import java.util.List;
+import java.util.Collections;
+
+import com.google.common.collect.Iterables;
 
 import org.apache.cassandra.cql3.functions.Function;
-import org.apache.cassandra.db.LivenessInfo;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
@@ -50,12 +51,16 @@ public class Attributes
         this.timeToLive = timeToLive;
     }
 
-    public void addFunctionsTo(List<Function> functions)
+    public Iterable<Function> getFunctions()
     {
-        if (timestamp != null)
-            timestamp.addFunctionsTo(functions);
-        if (timeToLive != null)
-            timeToLive.addFunctionsTo(functions);
+        if (timestamp != null && timeToLive != null)
+            return Iterables.concat(timestamp.getFunctions(), timeToLive.getFunctions());
+        else if (timestamp != null)
+            return timestamp.getFunctions();
+        else if (timeToLive != null)
+            return timeToLive.getFunctions();
+        else
+            return Collections.emptySet();
     }
 
     public boolean isTimestampSet()
@@ -92,17 +97,17 @@ public class Attributes
         return LongType.instance.compose(tval);
     }
 
-    public int getTimeToLive(QueryOptions options, int defaultTimeToLive) throws InvalidRequestException
+    public int getTimeToLive(QueryOptions options) throws InvalidRequestException
     {
         if (timeToLive == null)
-            return defaultTimeToLive;
+            return 0;
 
         ByteBuffer tval = timeToLive.bindAndGet(options);
         if (tval == null)
-            return 0;
+            throw new InvalidRequestException("Invalid null value of TTL");
 
-        if (tval == ByteBufferUtil.UNSET_BYTE_BUFFER)
-            return defaultTimeToLive;
+        if (tval == ByteBufferUtil.UNSET_BYTE_BUFFER) // treat as unlimited
+            return 0;
 
         try
         {
@@ -119,9 +124,6 @@ public class Attributes
 
         if (ttl > MAX_TTL)
             throw new InvalidRequestException(String.format("ttl is too large. requested (%d) maximum (%d)", ttl, MAX_TTL));
-
-        if (defaultTimeToLive != LivenessInfo.NO_TTL && ttl == LivenessInfo.NO_TTL)
-            return LivenessInfo.NO_TTL;
 
         return ttl;
     }

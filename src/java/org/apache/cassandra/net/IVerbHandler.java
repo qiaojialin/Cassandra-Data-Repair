@@ -36,5 +36,5 @@ public interface IVerbHandler<T>
      * @param message - incoming message that needs handling.
      * @param id
      */
-    void doVerb(MessageIn<T> message, int id) throws IOException;
+    public void doVerb(MessageIn<T> message, int id) throws IOException;
 }

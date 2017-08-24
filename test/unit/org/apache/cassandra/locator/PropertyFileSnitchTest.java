@@ -35,7 +35,6 @@ import java.util.UUID;
 
 import com.google.common.net.InetAddresses;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.RandomPartitioner;
 import org.apache.cassandra.dht.Token;
@@ -47,7 +46,6 @@ import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
 
 import static org.junit.Assert.*;
@@ -62,12 +60,6 @@ public class PropertyFileSnitchTest
 
     private VersionedValue.VersionedValueFactory valueFactory;
     private Map<InetAddress, Set<Token>> tokenMap;
-
-    @BeforeClass
-    public static void setupDD()
-    {
-        DatabaseDescriptor.daemonInitialization();
-    }
 
     @Before
     public void setup() throws ConfigurationException, IOException

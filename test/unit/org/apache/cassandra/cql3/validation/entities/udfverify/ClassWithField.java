@@ -21,27 +21,20 @@ package org.apache.cassandra.cql3.validation.entities.udfverify;
 import java.nio.ByteBuffer;
 import java.util.List;
 
-import com.datastax.driver.core.TypeCodec;
+import com.datastax.driver.core.DataType;
 import org.apache.cassandra.cql3.functions.JavaUDF;
-import org.apache.cassandra.cql3.functions.UDFContext;
-import org.apache.cassandra.transport.ProtocolVersion;
 
 /**
  * Used by {@link org.apache.cassandra.cql3.validation.entities.UFVerifierTest}.
  */
 public final class ClassWithField extends JavaUDF
 {
-    public ClassWithField(TypeCodec<Object> returnDataType, TypeCodec<Object>[] argDataTypes, UDFContext udfContext)
+    public ClassWithField(DataType returnDataType, DataType[] argDataTypes)
     {
-        super(returnDataType, argDataTypes, udfContext);
+        super(returnDataType, argDataTypes);
     }
 
-    protected Object executeAggregateImpl(ProtocolVersion protocolVersion, Object firstParam, List<ByteBuffer> params)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    protected ByteBuffer executeImpl(ProtocolVersion protocolVersion, List<ByteBuffer> params)
+    protected ByteBuffer executeImpl(int protocolVersion, List<ByteBuffer> params)
     {
         return null;
     }

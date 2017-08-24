@@ -30,28 +30,20 @@ import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.db.RowUpdateBuilder;
-import org.apache.cassandra.db.lifecycle.SSTableSet;
-import org.apache.cassandra.db.lifecycle.View;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.locator.TokenMetadata;
-import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.concurrent.Refs;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
 
 public class ActiveRepairServiceTest
 {
     public static final String KEYSPACE5 = "Keyspace5";
-    public static final String CF_STANDARD1 = "Standard1";
+    public static final String CF_STANDRAD1 = "Standard1";
     public static final String CF_COUNTER = "Counter1";
 
     public String cfname;
@@ -67,7 +59,7 @@ public class ActiveRepairServiceTest
         SchemaLoader.createKeyspace(KEYSPACE5,
                                     KeyspaceParams.simple(2),
                                     SchemaLoader.standardCFMD(KEYSPACE5, CF_COUNTER),
-                                    SchemaLoader.standardCFMD(KEYSPACE5, CF_STANDARD1));
+                                    SchemaLoader.standardCFMD(KEYSPACE5, CF_STANDRAD1));
     }
 
     @Before
@@ -100,7 +92,7 @@ public class ActiveRepairServiceTest
         Set<InetAddress> neighbors = new HashSet<>();
         for (Range<Token> range : ranges)
         {
-            neighbors.addAll(ActiveRepairService.getNeighbors(KEYSPACE5, ranges, range, null, null));
+            neighbors.addAll(ActiveRepairService.getNeighbors(KEYSPACE5, range, null, null));
         }
         assertEquals(expected, neighbors);
     }
@@ -123,7 +115,7 @@ public class ActiveRepairServiceTest
         Set<InetAddress> neighbors = new HashSet<>();
         for (Range<Token> range : ranges)
         {
-            neighbors.addAll(ActiveRepairService.getNeighbors(KEYSPACE5, ranges, range, null, null));
+            neighbors.addAll(ActiveRepairService.getNeighbors(KEYSPACE5, range, null, null));
         }
         assertEquals(expected, neighbors);
     }
@@ -145,7 +137,7 @@ public class ActiveRepairServiceTest
         Set<InetAddress> neighbors = new HashSet<>();
         for (Range<Token> range : ranges)
         {
-            neighbors.addAll(ActiveRepairService.getNeighbors(KEYSPACE5, ranges, range, Arrays.asList(DatabaseDescriptor.getLocalDataCenter()), null));
+            neighbors.addAll(ActiveRepairService.getNeighbors(KEYSPACE5, range, Arrays.asList(DatabaseDescriptor.getLocalDataCenter()), null));
         }
         assertEquals(expected, neighbors);
     }
@@ -173,7 +165,7 @@ public class ActiveRepairServiceTest
         Set<InetAddress> neighbors = new HashSet<>();
         for (Range<Token> range : ranges)
         {
-            neighbors.addAll(ActiveRepairService.getNeighbors(KEYSPACE5, ranges, range, Arrays.asList(DatabaseDescriptor.getLocalDataCenter()), null));
+            neighbors.addAll(ActiveRepairService.getNeighbors(KEYSPACE5, range, Arrays.asList(DatabaseDescriptor.getLocalDataCenter()), null));
         }
         assertEquals(expected, neighbors);
     }
@@ -194,11 +186,10 @@ public class ActiveRepairServiceTest
 
         expected.remove(FBUtilities.getBroadcastAddress());
         Collection<String> hosts = Arrays.asList(FBUtilities.getBroadcastAddress().getCanonicalHostName(),expected.get(0).getCanonicalHostName());
-        Collection<Range<Token>> ranges = StorageService.instance.getLocalRanges(KEYSPACE5);
 
-        assertEquals(expected.get(0), ActiveRepairService.getNeighbors(KEYSPACE5, ranges,
-                                                                       ranges.iterator().next(),
-                                                                       null, hosts).iterator().next());
+       assertEquals(expected.get(0), ActiveRepairService.getNeighbors(KEYSPACE5,
+               StorageService.instance.getLocalRanges(KEYSPACE5).iterator().next(),
+               null, hosts).iterator().next());
     }
 
     @Test(expected = IllegalArgumentException.class)
@@ -207,8 +198,7 @@ public class ActiveRepairServiceTest
         addTokens(2 * Keyspace.open(KEYSPACE5).getReplicationStrategy().getReplicationFactor());
         //Dont give local endpoint
         Collection<String> hosts = Arrays.asList("127.0.0.3");
-        Collection<Range<Token>> ranges = StorageService.instance.getLocalRanges(KEYSPACE5);
-        ActiveRepairService.getNeighbors(KEYSPACE5, ranges, ranges.iterator().next(), null, hosts);
+        ActiveRepairService.getNeighbors(KEYSPACE5, StorageService.instance.getLocalRanges(KEYSPACE5).iterator().next(), null, hosts);
     }
 
     Set<InetAddress> addTokens(int max) throws Throwable
@@ -222,59 +212,5 @@ public class ActiveRepairServiceTest
             endpoints.add(endpoint);
         }
         return endpoints;
-    }
-
-    @Test
-    public void testSnapshotAddSSTables() throws Exception
-    {
-        ColumnFamilyStore store = prepareColumnFamilyStore();
-        UUID prsId = UUID.randomUUID();
-        Set<SSTableReader> original = Sets.newHashSet(store.select(View.select(SSTableSet.CANONICAL, (s) -> !s.isRepaired())).sstables);
-        ActiveRepairService.instance.registerParentRepairSession(prsId, FBUtilities.getBroadcastAddress(), Collections.singletonList(store),
-                                                                 Collections.singleton(new Range<>(store.getPartitioner().getMinimumToken(),
-                                                                                                   store.getPartitioner().getMinimumToken())),
-                                                                 true, System.currentTimeMillis(), true, PreviewKind.NONE);
-        ActiveRepairService.instance.getParentRepairSession(prsId).maybeSnapshot(store.metadata.id, prsId);
-
-        UUID prsId2 = UUID.randomUUID();
-        ActiveRepairService.instance.registerParentRepairSession(prsId2, FBUtilities.getBroadcastAddress(),
-                                                                 Collections.singletonList(store),
-                                                                 Collections.singleton(new Range<>(store.getPartitioner().getMinimumToken(),
-                                                                                                   store.getPartitioner().getMinimumToken())),
-                                                                 true, System.currentTimeMillis(),
-                                                                 true, PreviewKind.NONE);
-        createSSTables(store, 2);
-        ActiveRepairService.instance.getParentRepairSession(prsId).maybeSnapshot(store.metadata.id, prsId);
-        try (Refs<SSTableReader> refs = store.getSnapshotSSTableReaders(prsId.toString()))
-        {
-            assertEquals(original, Sets.newHashSet(refs.iterator()));
-        }
-    }
-
-    private ColumnFamilyStore prepareColumnFamilyStore()
-    {
-        Keyspace keyspace = Keyspace.open(KEYSPACE5);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF_STANDARD1);
-        store.truncateBlocking();
-        store.disableAutoCompaction();
-        createSSTables(store, 10);
-        return store;
-    }
-
-    private void createSSTables(ColumnFamilyStore cfs, int count)
-    {
-        long timestamp = System.currentTimeMillis();
-        for (int i = 0; i < count; i++)
-        {
-            for (int j = 0; j < 10; j++)
-            {
-                new RowUpdateBuilder(cfs.metadata(), timestamp, Integer.toString(j))
-                .clustering("c")
-                .add("val", "val")
-                .build()
-                .applyUnsafe();
-            }
-            cfs.forceBlockingFlush();
-        }
     }
 }

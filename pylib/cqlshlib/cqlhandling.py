@@ -35,8 +35,7 @@ class CqlParsingRuleSet(pylexotron.ParsingRuleSet):
     available_compaction_classes = (
         'LeveledCompactionStrategy',
         'SizeTieredCompactionStrategy',
-        'DateTieredCompactionStrategy',
-        'TimeWindowCompactionStrategy'
+        'DateTieredCompactionStrategy'
     )
 
     replication_strategies = (
@@ -143,7 +142,6 @@ class CqlParsingRuleSet(pylexotron.ParsingRuleSet):
         stmts = util.split_list(tokens, lambda t: t[0] == 'endtoken')
         output = []
         in_batch = False
-        in_pg_string = len([st for st in tokens if len(st) > 0 and st[0] == 'unclosedPgString']) == 1
         for stmt in stmts:
             if in_batch:
                 output[-1].extend(stmt)
@@ -154,7 +152,7 @@ class CqlParsingRuleSet(pylexotron.ParsingRuleSet):
                     in_batch = False
                 elif stmt[0][1].upper() == 'BEGIN':
                     in_batch = True
-        return output, in_batch or in_pg_string
+        return output, in_batch
 
     def cql_complete_single(self, text, partial, init_bindings={}, ignore_case=True,
                             startsymbol='Start'):
@@ -308,7 +306,7 @@ class CqlParsingRuleSet(pylexotron.ParsingRuleSet):
                 first = first[:-1]
             if debug:
                 print "** Got a partial completion: %r." % (common_prefix,)
-            return first + common_prefix
+            first += common_prefix
         if debug:
             print "** New total completion: %r. Checking for further matches...\n" % (first,)
         return self.cql_complete_multiple(text, first, init_bindings, startsymbol=startsymbol)

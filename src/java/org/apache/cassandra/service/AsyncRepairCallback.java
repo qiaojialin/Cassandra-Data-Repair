@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.service;
 
+import java.io.IOException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.cassandra.concurrent.Stage;
@@ -45,9 +46,9 @@ public class AsyncRepairCallback implements IAsyncCallback<ReadResponse>
         {
             StageManager.getStage(Stage.READ_REPAIR).execute(new WrappedRunnable()
             {
-                protected void runMayThrow()
+                protected void runMayThrow() throws DigestMismatchException, IOException
                 {
-                    repairResolver.compareResponses();
+                    repairResolver.resolve();
                 }
             });
         }

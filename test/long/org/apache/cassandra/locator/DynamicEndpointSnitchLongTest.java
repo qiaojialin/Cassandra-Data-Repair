@@ -31,13 +31,10 @@ import org.apache.cassandra.service.StorageService;
 
 import org.apache.cassandra.utils.FBUtilities;
 
+import static org.junit.Assert.assertEquals;
+
 public class DynamicEndpointSnitchLongTest
 {
-    static
-    {
-        DatabaseDescriptor.daemonInitialization();
-    }
-
     @Test
     public void testConcurrency() throws InterruptedException, IOException, ConfigurationException
     {

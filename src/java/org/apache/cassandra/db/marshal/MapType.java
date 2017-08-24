@@ -19,8 +19,6 @@ package org.apache.cassandra.db.marshal;
 
 import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 
 import org.apache.cassandra.cql3.Json;
 import org.apache.cassandra.cql3.Maps;
@@ -31,14 +29,14 @@ import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.serializers.CollectionSerializer;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.serializers.MapSerializer;
-import org.apache.cassandra.transport.ProtocolVersion;
+import org.apache.cassandra.transport.Server;
 import org.apache.cassandra.utils.Pair;
 
 public class MapType<K, V> extends CollectionType<Map<K, V>>
 {
     // interning instances
-    private static final ConcurrentMap<Pair<AbstractType<?>, AbstractType<?>>, MapType> instances = new ConcurrentHashMap<>();
-    private static final ConcurrentMap<Pair<AbstractType<?>, AbstractType<?>>, MapType> frozenInstances = new ConcurrentHashMap<>();
+    private static final Map<Pair<AbstractType<?>, AbstractType<?>>, MapType> instances = new HashMap<>();
+    private static final Map<Pair<AbstractType<?>, AbstractType<?>>, MapType> frozenInstances = new HashMap<>();
 
     private final AbstractType<K> keys;
     private final AbstractType<V> values;
@@ -54,13 +52,16 @@ public class MapType<K, V> extends CollectionType<Map<K, V>>
         return getInstance(l.get(0), l.get(1), true);
     }
 
-    public static <K, V> MapType<K, V> getInstance(AbstractType<K> keys, AbstractType<V> values, boolean isMultiCell)
+    public static synchronized <K, V> MapType<K, V> getInstance(AbstractType<K> keys, AbstractType<V> values, boolean isMultiCell)
     {
-        ConcurrentMap<Pair<AbstractType<?>, AbstractType<?>>, MapType> internMap = isMultiCell ? instances : frozenInstances;
+        Map<Pair<AbstractType<?>, AbstractType<?>>, MapType> internMap = isMultiCell ? instances : frozenInstances;
         Pair<AbstractType<?>, AbstractType<?>> p = Pair.<AbstractType<?>, AbstractType<?>>create(keys, values);
         MapType<K, V> t = internMap.get(p);
         if (t == null)
-            t = internMap.computeIfAbsent(p, k -> new MapType<>(k.left, k.right, isMultiCell) );
+        {
+            t = new MapType<>(keys, values, isMultiCell);
+            internMap.put(p, t);
+        }
         return t;
     }
 
@@ -74,17 +75,9 @@ public class MapType<K, V> extends CollectionType<Map<K, V>>
     }
 
     @Override
-    public boolean referencesUserType(String userTypeName)
+    public boolean references(AbstractType<?> check)
     {
-        return getKeysType().referencesUserType(userTypeName) ||
-               getValuesType().referencesUserType(userTypeName);
-    }
-
-    @Override
-    public boolean referencesDuration()
-    {
-        // Maps cannot be created with duration as keys
-        return getValuesType().referencesDuration();
+        return super.references(check) || keys.references(check) || values.references(check);
     }
 
     public AbstractType<K> getKeysType()
@@ -123,23 +116,6 @@ public class MapType<K, V> extends CollectionType<Map<K, V>>
     }
 
     @Override
-    public AbstractType<?> freezeNestedMulticellTypes()
-    {
-        if (!isMultiCell())
-            return this;
-
-        AbstractType<?> keyType = (keys.isFreezable() && keys.isMultiCell())
-                                ? keys.freeze()
-                                : keys.freezeNestedMulticellTypes();
-
-        AbstractType<?> valueType = (values.isFreezable() && values.isMultiCell())
-                                  ? values.freeze()
-                                  : values.freezeNestedMulticellTypes();
-
-        return getInstance(keyType, valueType, isMultiCell);
-    }
-
-    @Override
     public boolean isCompatibleWithFrozen(CollectionType<?> previous)
     {
         assert !isMultiCell;
@@ -169,7 +145,7 @@ public class MapType<K, V> extends CollectionType<Map<K, V>>
         ByteBuffer bb1 = o1.duplicate();
         ByteBuffer bb2 = o2.duplicate();
 
-        ProtocolVersion protocolVersion = ProtocolVersion.V3;
+        int protocolVersion = Server.VERSION_3;
         int size1 = CollectionSerializer.readCollectionSize(bb1, protocolVersion);
         int size2 = CollectionSerializer.readCollectionSize(bb2, protocolVersion);
 
@@ -255,7 +231,7 @@ public class MapType<K, V> extends CollectionType<Map<K, V>>
     }
 
     @Override
-    public String toJSONString(ByteBuffer buffer, ProtocolVersion protocolVersion)
+    public String toJSONString(ByteBuffer buffer, int protocolVersion)
     {
         StringBuilder sb = new StringBuilder("{");
         int size = CollectionSerializer.readCollectionSize(buffer, protocolVersion);
@@ -269,7 +245,7 @@ public class MapType<K, V> extends CollectionType<Map<K, V>>
             if (key.startsWith("\""))
                 sb.append(key);
             else
-                sb.append('"').append(Json.quoteAsJsonString(key)).append('"');
+                sb.append('"').append(Json.JSON_STRING_ENCODER.quoteAsString(key)).append('"');
 
             sb.append(": ");
             sb.append(values.toJSONString(CollectionSerializer.readValue(buffer, protocolVersion), protocolVersion));

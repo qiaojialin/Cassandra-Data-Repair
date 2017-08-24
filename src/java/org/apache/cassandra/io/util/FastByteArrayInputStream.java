@@ -36,8 +36,7 @@ import java.io.InputStream;
  *
  * @see ByteArrayInputStream
  */
-public class FastByteArrayInputStream extends InputStream
-{
+public class FastByteArrayInputStream extends InputStream {
     /**
      * The {@code byte} array containing the bytes to stream over.
      */
@@ -67,8 +66,7 @@ public class FastByteArrayInputStream extends InputStream
      * @param buf
      *            the byte array to stream over.
      */
-    public FastByteArrayInputStream(byte buf[])
-    {
+    public FastByteArrayInputStream(byte buf[]) {
         this.mark = 0;
         this.buf = buf;
         this.count = buf.length;
@@ -86,8 +84,7 @@ public class FastByteArrayInputStream extends InputStream
      * @param length
      *            the number of bytes available for streaming.
      */
-    public FastByteArrayInputStream(byte buf[], int offset, int length)
-    {
+    public FastByteArrayInputStream(byte buf[], int offset, int length) {
         this.buf = buf;
         pos = offset;
         mark = offset;
@@ -102,8 +99,7 @@ public class FastByteArrayInputStream extends InputStream
      * @return the number of bytes available before blocking.
      */
     @Override
-    public int available()
-    {
+    public int available() {
         return count - pos;
     }
 
@@ -114,8 +110,7 @@ public class FastByteArrayInputStream extends InputStream
      *             if an I/O error occurs while closing this stream.
      */
     @Override
-    public void close() throws IOException
-    {
+    public void close() throws IOException {
         // Do nothing on close, this matches JDK behaviour.
     }
 
@@ -130,8 +125,7 @@ public class FastByteArrayInputStream extends InputStream
      * @see #reset()
      */
     @Override
-    public void mark(int readlimit)
-    {
+    public void mark(int readlimit) {
         mark = pos;
     }
 
@@ -145,8 +139,7 @@ public class FastByteArrayInputStream extends InputStream
      * @see #reset()
      */
     @Override
-    public boolean markSupported()
-    {
+    public boolean markSupported() {
         return true;
     }
 
@@ -158,8 +151,7 @@ public class FastByteArrayInputStream extends InputStream
      * @return the byte read or -1 if the end of this stream has been reached.
      */
     @Override
-    public int read()
-    {
+    public int read() {
         return pos < count ? buf[pos++] & 0xFF : -1;
     }
 
@@ -185,24 +177,20 @@ public class FastByteArrayInputStream extends InputStream
      *             if {@code b} is {@code null}.
      */
     @Override
-    public int read(byte b[], int offset, int length)
-    {
+    public int read(byte b[], int offset, int length) {
         if (b == null) {
             throw new NullPointerException();
         }
         // avoid int overflow
         if (offset < 0 || offset > b.length || length < 0
-                || length > b.length - offset)
-        {
+                || length > b.length - offset) {
             throw new IndexOutOfBoundsException();
         }
         // Are there any bytes available?
-        if (this.pos >= this.count)
-        {
+        if (this.pos >= this.count) {
             return -1;
         }
-        if (length == 0)
-        {
+        if (length == 0) {
             return 0;
         }
 
@@ -220,8 +208,7 @@ public class FastByteArrayInputStream extends InputStream
      * @see #mark(int)
      */
     @Override
-    public void reset()
-    {
+    public void reset() {
         pos = mark;
     }
 
@@ -236,10 +223,8 @@ public class FastByteArrayInputStream extends InputStream
      * @return the number of bytes actually skipped.
      */
     @Override
-    public long skip(long n)
-    {
-        if (n <= 0)
-        {
+    public long skip(long n) {
+        if (n <= 0) {
             return 0;
         }
         int temp = pos;

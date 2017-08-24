@@ -1,32 +1,14 @@
-/*
- *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
- */
 package org.apache.cassandra.cql3.selection;
 
 import java.util.*;
 import java.util.stream.Collectors;
 
+import com.google.common.base.Function;
+import com.google.common.base.Joiner;
 import com.google.common.base.Objects;
 import com.google.common.collect.*;
 
-import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.ColumnSpecification;
 
 /**
@@ -38,7 +20,7 @@ import org.apache.cassandra.cql3.ColumnSpecification;
 public class SelectionColumnMapping implements SelectionColumns
 {
     private final ArrayList<ColumnSpecification> columnSpecifications;
-    private final HashMultimap<ColumnSpecification, ColumnMetadata> columnMappings;
+    private final HashMultimap<ColumnSpecification, ColumnDefinition> columnMappings;
 
     private SelectionColumnMapping()
     {
@@ -51,15 +33,15 @@ public class SelectionColumnMapping implements SelectionColumns
         return new SelectionColumnMapping();
     }
 
-    protected static SelectionColumnMapping simpleMapping(Iterable<ColumnMetadata> columnDefinitions)
+    protected static SelectionColumnMapping simpleMapping(Iterable<ColumnDefinition> columnDefinitions)
     {
         SelectionColumnMapping mapping = new SelectionColumnMapping();
-        for (ColumnMetadata def: columnDefinitions)
+        for (ColumnDefinition def: columnDefinitions)
             mapping.addMapping(def, def);
         return mapping;
     }
 
-    protected SelectionColumnMapping addMapping(ColumnSpecification colSpec, ColumnMetadata column)
+    protected SelectionColumnMapping addMapping(ColumnSpecification colSpec, ColumnDefinition column)
     {
         columnSpecifications.add(colSpec);
         // functions without arguments do not map to any column, so don't
@@ -69,7 +51,7 @@ public class SelectionColumnMapping implements SelectionColumns
         return this;
     }
 
-    protected SelectionColumnMapping addMapping(ColumnSpecification colSpec, Iterable<ColumnMetadata> columns)
+    protected SelectionColumnMapping addMapping(ColumnSpecification colSpec, Iterable<ColumnDefinition> columns)
     {
         columnSpecifications.add(colSpec);
         columnMappings.putAll(colSpec, columns);
@@ -83,7 +65,7 @@ public class SelectionColumnMapping implements SelectionColumns
         return Lists.newArrayList(columnSpecifications);
     }
 
-    public Multimap<ColumnSpecification, ColumnMetadata> getMappings()
+    public Multimap<ColumnSpecification, ColumnDefinition> getMappings()
     {
         return Multimaps.unmodifiableMultimap(columnMappings);
     }

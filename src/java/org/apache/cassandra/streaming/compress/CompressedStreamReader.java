@@ -17,27 +17,28 @@
  */
 package org.apache.cassandra.streaming.compress;
 
+import java.io.DataInputStream;
 import java.io.IOException;
 import java.nio.channels.Channels;
 import java.nio.channels.ReadableByteChannel;
 
 import com.google.common.base.Throwables;
+
+import org.apache.cassandra.io.sstable.SSTableMultiWriter;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.io.compress.CompressionMetadata;
-import org.apache.cassandra.io.sstable.SSTableMultiWriter;
-import org.apache.cassandra.io.util.TrackedInputStream;
 import org.apache.cassandra.streaming.ProgressInfo;
 import org.apache.cassandra.streaming.StreamReader;
 import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.messages.FileMessageHeader;
-import org.apache.cassandra.utils.ChecksumType;
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.BytesReadTracker;
 import org.apache.cassandra.utils.Pair;
-
-import static org.apache.cassandra.utils.Throwables.extractIOExceptionCause;
 
 /**
  * StreamReader that reads from streamed compressed SSTable
@@ -62,37 +63,30 @@ public class CompressedStreamReader extends StreamReader
     @SuppressWarnings("resource") // channel needs to remain open, streams on top of it can't be closed
     public SSTableMultiWriter read(ReadableByteChannel channel) throws IOException
     {
+        logger.debug("reading file from {}, repairedAt = {}", session.peer, repairedAt);
         long totalSize = totalSize();
 
-        ColumnFamilyStore cfs = ColumnFamilyStore.getIfExists(tableId);
-
-        if (cfs == null)
+        Pair<String, String> kscf = Schema.instance.getCF(cfId);
+        if (kscf == null)
         {
             // schema was dropped during streaming
-            throw new IOException("CF " + tableId + " was dropped during streaming");
+            throw new IOException("CF " + cfId + " was dropped during streaming");
         }
-
-        logger.debug("[Stream #{}] Start receiving file #{} from {}, repairedAt = {}, size = {}, ks = '{}', pendingRepair = '{}', table = '{}'.",
-                     session.planId(), fileSeqNum, session.peer, repairedAt, totalSize, cfs.keyspace.getName(), pendingRepair,
-                     cfs.getTableName());
+        ColumnFamilyStore cfs = Keyspace.open(kscf.left).getColumnFamilyStore(kscf.right);
 
         CompressedInputStream cis = new CompressedInputStream(Channels.newInputStream(channel), compressionInfo,
-                                                              ChecksumType.CRC32, cfs::getCrcCheckChance);
-        TrackedInputStream in = new TrackedInputStream(cis);
-
-        StreamDeserializer deserializer = new StreamDeserializer(cfs.metadata(), in, inputVersion, getHeader(cfs.metadata()));
+                                                              inputVersion.compressedChecksumType(), cfs::getCrcCheckChance);
+        BytesReadTracker in = new BytesReadTracker(new DataInputStream(cis));
+        StreamDeserializer deserializer = new StreamDeserializer(cfs.metadata, in, inputVersion, header.toHeader(cfs.metadata));
         SSTableMultiWriter writer = null;
         try
         {
-            writer = createWriter(cfs, totalSize, repairedAt, pendingRepair, format);
-            String filename = writer.getFilename();
-            int sectionIdx = 0;
+            writer = createWriter(cfs, totalSize, repairedAt, format);
             for (Pair<Long, Long> section : sections)
             {
                 assert cis.getTotalCompressedBytesRead() <= totalSize;
-                long sectionLength = section.right - section.left;
+                int sectionLength = (int) (section.right - section.left);
 
-                logger.trace("[Stream #{}] Reading section {} with length {} from stream.", session.planId(), sectionIdx++, sectionLength);
                 // skip to beginning of section inside chunk
                 cis.position(section.left);
                 in.reset(0);
@@ -101,24 +95,26 @@ public class CompressedStreamReader extends StreamReader
                 {
                     writePartition(deserializer, writer);
                     // when compressed, report total bytes of compressed chunks read since remoteFile.size is the sum of chunks transferred
-                    session.progress(filename, ProgressInfo.Direction.IN, cis.getTotalCompressedBytesRead(), totalSize);
+                    session.progress(desc, ProgressInfo.Direction.IN, cis.getTotalCompressedBytesRead(), totalSize);
                 }
             }
-            logger.debug("[Stream #{}] Finished receiving file #{} from {} readBytes = {}, totalSize = {}", session.planId(), fileSeqNum,
-                         session.peer, FBUtilities.prettyPrintMemory(cis.getTotalCompressedBytesRead()), FBUtilities.prettyPrintMemory(totalSize));
             return writer;
         }
         catch (Throwable e)
         {
-            logger.warn("[Stream {}] Error while reading partition {} from stream on ks='{}' and table='{}'.",
-                        session.planId(), deserializer.partitionKey(), cfs.keyspace.getName(), cfs.getTableName());
             if (writer != null)
             {
                 writer.abort(e);
             }
-            if (extractIOExceptionCause(e).isPresent())
-                throw e;
-            throw Throwables.propagate(e);
+            drain(cis, in.getBytesRead());
+            if (e instanceof IOException)
+                throw (IOException) e;
+            else
+                throw Throwables.propagate(e);
+        }
+        finally
+        {
+            cis.close();
         }
     }
 

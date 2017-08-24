@@ -21,35 +21,30 @@ package org.apache.cassandra.cache;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
+import static org.junit.Assert.*;
 
-import com.github.benmanes.caffeine.cache.Weigher;
+
+import java.util.ArrayList;
+import java.util.List;
+
+
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.concurrent.NamedThreadFactory;
-import org.apache.cassandra.db.RowUpdateBuilder;
-import org.apache.cassandra.db.marshal.AsciiType;
-import org.apache.cassandra.db.marshal.UTF8Type;
-import org.apache.cassandra.db.partitions.CachedBTreePartition;
-import org.apache.cassandra.db.partitions.PartitionUpdate;
-import org.apache.cassandra.db.rows.UnfilteredRowIterators;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.schema.IndexMetadata;
-import org.apache.cassandra.schema.Indexes;
-import org.apache.cassandra.schema.KeyspaceParams;
-import org.apache.cassandra.schema.TableId;
-import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.Pair;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNotSame;
-import static org.junit.Assert.assertTrue;
+import com.googlecode.concurrentlinkedhashmap.Weighers;
+
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.rows.*;
+import org.apache.cassandra.db.marshal.AsciiType;
+import org.apache.cassandra.db.partitions.*;
+import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.schema.KeyspaceParams;
+import org.apache.cassandra.utils.FBUtilities;
 
 public class CacheProviderTest
 {
@@ -62,20 +57,20 @@ public class CacheProviderTest
     private static final String KEYSPACE1 = "CacheProviderTest1";
     private static final String CF_STANDARD1 = "Standard1";
 
-    private static TableMetadata cfm;
+    private static CFMetaData cfm;
 
     @BeforeClass
     public static void defineSchema() throws ConfigurationException
     {
         SchemaLoader.prepareServer();
 
-        cfm =
-            TableMetadata.builder(KEYSPACE1, CF_STANDARD1)
-                         .addPartitionKeyColumn("pKey", AsciiType.instance)
-                         .addRegularColumn("col1", AsciiType.instance)
-                         .build();
-
-        SchemaLoader.createKeyspace(KEYSPACE1, KeyspaceParams.simple(1), cfm);
+        cfm = CFMetaData.Builder.create(KEYSPACE1, CF_STANDARD1)
+                                        .addPartitionKey("pKey", AsciiType.instance)
+                                        .addRegularColumn("col1", AsciiType.instance)
+                                        .build();
+        SchemaLoader.createKeyspace(KEYSPACE1,
+                                    KeyspaceParams.simple(1),
+                                    cfm);
     }
 
     private CachedBTreePartition createPartition()
@@ -140,7 +135,7 @@ public class CacheProviderTest
         List<Thread> threads = new ArrayList<>(100);
         for (int i = 0; i < 100; i++)
         {
-            Thread thread = NamedThreadFactory.createThread(runnable);
+            Thread thread = new Thread(runnable);
             threads.add(thread);
             thread.start();
         }
@@ -151,8 +146,7 @@ public class CacheProviderTest
     @Test
     public void testSerializingCache() throws InterruptedException
     {
-        ICache<MeasureableString, IRowCacheEntry> cache = SerializingCache.create(CAPACITY,
-            Weigher.singletonWeigher(), new SerializingCacheProvider.RowCacheSerializer());
+        ICache<MeasureableString, IRowCacheEntry> cache = SerializingCache.create(CAPACITY, Weighers.<RefCountedMemory>singleton(), new SerializingCacheProvider.RowCacheSerializer());
         CachedBTreePartition partition = createPartition();
         simpleCase(partition, cache);
         concurrentCase(partition, cache);
@@ -161,43 +155,16 @@ public class CacheProviderTest
     @Test
     public void testKeys()
     {
-        TableId id1 = TableId.generate();
+        Pair<String, String> ksAndCFName = Pair.create(KEYSPACE1, CF_STANDARD1);
         byte[] b1 = {1, 2, 3, 4};
-        RowCacheKey key1 = new RowCacheKey(id1, null, ByteBuffer.wrap(b1));
-        TableId id2 = TableId.fromString(id1.toString());
+        RowCacheKey key1 = new RowCacheKey(ksAndCFName, ByteBuffer.wrap(b1));
         byte[] b2 = {1, 2, 3, 4};
-        RowCacheKey key2 = new RowCacheKey(id2, null, ByteBuffer.wrap(b2));
+        RowCacheKey key2 = new RowCacheKey(ksAndCFName, ByteBuffer.wrap(b2));
         assertEquals(key1, key2);
         assertEquals(key1.hashCode(), key2.hashCode());
-
-        TableMetadata tm = TableMetadata.builder("ks", "tab", id1)
-                                        .addPartitionKeyColumn("pk", UTF8Type.instance)
-                                        .build();
-
-        assertTrue(key1.sameTable(tm));
 
         byte[] b3 = {1, 2, 3, 5};
-        RowCacheKey key3 = new RowCacheKey(id1, null, ByteBuffer.wrap(b3));
-        assertNotSame(key1, key3);
-        assertNotSame(key1.hashCode(), key3.hashCode());
-
-        // with index name
-
-        key1 = new RowCacheKey(id1, "indexFoo", ByteBuffer.wrap(b1));
-        assertNotSame(key1, key2);
-        assertNotSame(key1.hashCode(), key2.hashCode());
-
-        key2 = new RowCacheKey(id2, "indexFoo", ByteBuffer.wrap(b2));
-        assertEquals(key1, key2);
-        assertEquals(key1.hashCode(), key2.hashCode());
-
-        tm = TableMetadata.builder("ks", "tab.indexFoo", id1)
-                          .addPartitionKeyColumn("pk", UTF8Type.instance)
-                          .indexes(Indexes.of(IndexMetadata.fromSchemaMetadata("indexFoo", IndexMetadata.Kind.KEYS, Collections.emptyMap())))
-                          .build();
-        assertTrue(key1.sameTable(tm));
-
-        key3 = new RowCacheKey(id1, "indexFoo", ByteBuffer.wrap(b3));
+        RowCacheKey key3 = new RowCacheKey(ksAndCFName, ByteBuffer.wrap(b3));
         assertNotSame(key1, key3);
         assertNotSame(key1.hashCode(), key3.hashCode());
     }
